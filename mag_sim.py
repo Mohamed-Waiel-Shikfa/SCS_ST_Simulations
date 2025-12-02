@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
 from scipy.integrate import solve_ivp
 from scipy.special import ellipk, ellipe
 
@@ -241,48 +242,70 @@ ax_mag = fig.add_subplot(gs[0, 1])
 ax_comb = fig.add_subplot(gs[0, 2])
 
 # Plot Settings
-# We use vmin=-1.5, vmax=1.5 to center Black at 0 Tesla
-kw_mesh = dict(shading='auto', cmap=cm, vmin=-1.5, vmax=1.5)
+# Coil needs a separate, tighter scale to be visible
+# Peak field ~0.25T, so +/- 0.3T scale makes it bright
+kw_mesh_coil = dict(shading='auto', cmap=cm, vmin=-0.3, vmax=0.3)
+# Magnet needs full scale (+/- 1.5T)
+kw_mesh_mag = dict(shading='auto', cmap=cm, vmin=-1.5, vmax=1.5)
 
 # Initial Meshes (Bz Component)
 # Coil (Opposing)
 Bz_c_init = Bz_unit_coil * (-results_I[0])
-mesh_coil = ax_coil.pcolormesh(Z_grid*1000, R_grid*1000, Bz_c_init, **kw_mesh)
-ax_coil.set_title("Coil Field (Opposing)")
+mesh_coil = ax_coil.pcolormesh(Z_grid*1000, R_grid*1000, Bz_c_init, **kw_mesh_coil)
+ax_coil.set_title("Coil Field (Breath w/ Pulse)")
 
 # Magnet
 Bz_m_init = Bz_unit_mag * results_M[0]
-mesh_mag = ax_mag.pcolormesh(Z_grid*1000, R_grid*1000, Bz_m_init, **kw_mesh)
+mesh_mag = ax_mag.pcolormesh(Z_grid*1000, R_grid*1000, Bz_m_init, **kw_mesh_mag)
 ax_mag.set_title("Magnet Field")
 
 # Combined
 Bz_t_init = Bz_c_init + Bz_m_init
-mesh_comb = ax_comb.pcolormesh(Z_grid*1000, R_grid*1000, Bz_t_init, **kw_mesh)
+mesh_comb = ax_comb.pcolormesh(Z_grid*1000, R_grid*1000, Bz_t_init, **kw_mesh_mag)
 ax_comb.set_title("Combined Interaction")
 
 # Initial Quivers (Arrows)
-# We initialize with zeros, update loop will fill them
-# FIXED: Scale increased to 25 (smaller arrows) and width reduced
 q_kw = dict(color='white', pivot='mid', scale=25, width=0.005)
 Q_coil = ax_coil.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 Q_mag = ax_mag.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 Q_comb = ax_comb.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 
-# Geometry & Formatting
-for ax in [ax_coil, ax_mag, ax_comb]:
-    # Magnet Body
-    ax.add_patch(plt.Rectangle((-MAG_LENGTH_MM/2, 0), MAG_LENGTH_MM, MAG_RADIUS*1000,
-                 ec='lime', fc='none', lw=1.5, ls='-'))
+# Geometry & Magnet Face Visualization
+# We use two rectangles per magnet: North Half (Red) and South Half (Blue)
+# This visually indicates the "Poles" on the faces, independent of the field map
+magnet_patches = {}
+
+def create_magnet_patches(ax):
+    # Top Half (Positive Z)
+    r_top = Rectangle((0, 0), MAG_LENGTH_MM/2, MAG_RADIUS*1000, ec='none', alpha=0.6)
+    # Bottom Half (Negative Z)
+    r_bot = Rectangle((-MAG_LENGTH_MM/2, 0), MAG_LENGTH_MM/2, MAG_RADIUS*1000, ec='none', alpha=0.6)
+
+    # Border
+    r_border = Rectangle((-MAG_LENGTH_MM/2, 0), MAG_LENGTH_MM, MAG_RADIUS*1000,
+                         ec='black', fc='none', lw=2)
+
+    ax.add_patch(r_top)
+    ax.add_patch(r_bot)
+    ax.add_patch(r_border)
+    return r_top, r_bot
+
+for name, ax in zip(['coil', 'mag', 'comb'], [ax_coil, ax_mag, ax_comb]):
+    # Magnet Patches (Pole Indicators)
+    magnet_patches[name] = create_magnet_patches(ax)
+
     # Coil Body
-    ax.add_patch(plt.Rectangle((-MAG_LENGTH_MM/2, MAG_RADIUS*1000), MAG_LENGTH_MM, 2,
+    ax.add_patch(Rectangle((-MAG_LENGTH_MM/2, MAG_RADIUS*1000), MAG_LENGTH_MM, 2,
                  ec='orange', fc='none', ls='--', lw=1))
+
     ax.set_aspect('equal')
     ax.set_xlabel('Z [mm]')
     ax.set_ylabel('R [mm]')
-    ax.set_xlim(-20, 20) # Ensure side view is clear
+    ax.set_xlim(-20, 20)
 
-# Colorbar
-fig.colorbar(mesh_comb, ax=ax_comb, label='Axial Field $B_z$ [T] (Blue=S, Red=N)')
+# Colorbars
+fig.colorbar(mesh_coil, ax=ax_coil, label='$B_z$ [T] (Low Scale)')
+fig.colorbar(mesh_comb, ax=ax_comb, label='$B_z$ [T] (Full Scale)')
 
 # --- Bottom Row: Stats & Dynamics ---
 
@@ -290,7 +313,7 @@ fig.colorbar(mesh_comb, ax=ax_comb, label='Axial Field $B_z$ [T] (Blue=S, Red=N)
 ax_dyn = fig.add_subplot(gs[1, 0])
 line_I, = ax_dyn.plot([], [], 'r-', label='Current (A)', linewidth=2)
 ax_dyn.set_xlim(0, SIM_TOTAL_TIME_US)
-ax_dyn.set_ylim(-1, max(peak_I * 1.2, 1)) # Ensure non-zero ylim
+ax_dyn.set_ylim(-1, max(peak_I * 1.2, 1))
 ax_dyn.set_xlabel('Time [$\mu$s]')
 ax_dyn.set_ylabel('Current [A]', color='r')
 ax_dyn.grid(True, alpha=0.3)
@@ -319,7 +342,7 @@ stats_template = (
     "Time: {time:.1f} $\mu$s\n"
     "Current: {curr:.2f} A\n"
     "Cap Volts: {volt:.1f} V\n"
-    "Pulse Energy: {energy:.4f} J\n\n" # Increased precision for small cap
+    "Energy Used: {energy:.4f} J\n\n"
     "Magnet State:\n"
     "  H_app: {happ:.1f} kA/m\n"
     "  Mag (M): {mag:.2f} T\n"
@@ -339,11 +362,9 @@ def update(frame):
     curr_V = results_V[idx]
     curr_M = results_M[idx]
 
-    # 1. Update Coil Field (Factor is negative for opposing field)
-    # We use magnitude for vector length but Bz for color
+    # 1. Update Heatmaps
     factor_coil = -curr_I
 
-    # Update Heatmaps (Bz component for polarity color)
     Bz_c = Bz_unit_coil * factor_coil
     Bz_m = Bz_unit_mag * curr_M
     Bz_t = Bz_c + Bz_m
@@ -352,29 +373,43 @@ def update(frame):
     mesh_mag.set_array(Bz_m.ravel())
     mesh_comb.set_array(Bz_t.ravel())
 
-    # 2. Update Quivers (Arrows)
-    # Coil Arrows
+    # 2. Update Quivers
     br_c_q = Br_q_coil * factor_coil
     bz_c_q = Bz_q_coil * factor_coil
-    Q_coil.set_UVC(bz_c_q, br_c_q) # X=Bz (Axial), Y=Br (Radial)
+    Q_coil.set_UVC(bz_c_q, br_c_q)
 
-    # Magnet Arrows
     br_m_q = Br_q_mag * curr_M
     bz_m_q = Bz_q_mag * curr_M
     Q_mag.set_UVC(bz_m_q, br_m_q)
 
-    # Combined Arrows
     Q_comb.set_UVC(bz_c_q + bz_m_q, br_c_q + br_m_q)
 
-    # 3. Update Lines
+    # 3. Update Magnet Face Colors (Visual Poles)
+    # If M > 0 (North is +Z/Right): Right Half Red, Left Half Blue
+    # If M < 0 (South is +Z/Right): Right Half Blue, Left Half Red
+    # Note: In our grid, +Z is right.
+    if curr_M > 0:
+        c_right = 'red'  # North Face
+        c_left = 'blue'  # South Face
+        pol_str = "NORTH (Right)"
+    else:
+        c_right = 'blue' # South Face
+        c_left = 'red'   # North Face
+        pol_str = "SOUTH (Right)"
+
+    for name in ['coil', 'mag', 'comb']:
+        r_top, r_bot = magnet_patches[name]
+        # In our patches, r_top is at +Z (Right), r_bot is at -Z (Left)
+        r_top.set_facecolor(c_right)
+        r_bot.set_facecolor(c_left)
+
+    # 4. Update Lines
     line_I.set_data(time_us[:idx], results_I[:idx])
     line_V.set_data(time_us[:idx], results_V[:idx])
     point_hys.set_data([results_H[idx]/1000], [curr_M])
 
-    # 4. Stats
-    # Calc energy consumed so far: 0.5 * C * (V_start^2 - V_now^2)
+    # 5. Stats
     e_consumed = 0.5 * CAPACITANCE * (VOLTAGE_INIT**2 - curr_V**2)
-    pol = "NORTH UP (Red)" if curr_M > 0 else "SOUTH UP (Blue)"
 
     txt = stats_template.format(
         time=time_us[idx],
@@ -383,7 +418,7 @@ def update(frame):
         energy=e_consumed,
         happ=results_H[idx]/1000,
         mag=curr_M,
-        pol=pol
+        pol=pol_str
     )
     stats_text.set_text(txt)
 
@@ -392,8 +427,8 @@ def update(frame):
 ani = FuncAnimation(fig, update, frames=ANIMATION_FRAMES, interval=80, blit=False)
 
 plt.tight_layout()
-plt.suptitle("EPM Polarity Switch (Red=North, Blue=South, Black=Zero)", fontsize=16)
+plt.suptitle("EPM Polarity Switch (Red/Blue Blocks = Poles)", fontsize=16)
 plt.subplots_adjust(top=0.92)
 plt.show()
 
-print("Animation initialized. Red=North, Blue=South. Arrows indicate field direction.")
+print("Animation initialized. Magnet faces now colored Red/Blue to indicate poles.")
