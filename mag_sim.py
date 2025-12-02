@@ -13,7 +13,8 @@ from scipy.special import ellipk, ellipe
 # Simulation Control
 SIM_TOTAL_TIME_US = 100.0  # Total window 0.1ms
 PULSE_WIDTH_US = 30.0      # Controller turns off at 30us
-TIME_STEP_US = 0.5         # Finer step for better physics
+# PULSE_WIDTH_US = 15.5      # Controller turns off at 30us
+TIME_STEP_US = 0.1         # Finer step for better physics
 ANIMATION_FRAMES = 50      # Frames for animation
 
 # Magnet Parameters (Alnico 5)
@@ -251,7 +252,7 @@ mesh_comb = ax_comb.pcolormesh(Z_grid*1000, R_grid*1000, Bz_t_init, **kw_mesh_ma
 ax_comb.set_title("Combined Interaction (EPM Dynamics)")
 
 # Initial Quiver (Arrows)
-q_kw = dict(color='white', pivot='mid', scale=25, width=0.005)
+q_kw = dict(color='white', pivot='mid', scale=5, width=0.005)
 Q_comb = ax_comb.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 
 # Geometry & Magnet Face Visualization
