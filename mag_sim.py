@@ -262,7 +262,8 @@ ax_comb.set_title("Combined Interaction")
 
 # Initial Quivers (Arrows)
 # We initialize with zeros, update loop will fill them
-q_kw = dict(color='white', pivot='mid', scale=None) # Scale auto
+# FIXED: Scale increased to 25 (smaller arrows) and width reduced
+q_kw = dict(color='white', pivot='mid', scale=25, width=0.005)
 Q_coil = ax_coil.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 Q_mag = ax_mag.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
 Q_comb = ax_comb.quiver(Z_q*1000, R_q*1000, np.zeros_like(Z_q), np.zeros_like(R_q), **q_kw)
