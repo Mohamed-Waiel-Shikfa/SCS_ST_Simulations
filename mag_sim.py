@@ -11,8 +11,8 @@ from scipy.special import ellipk, ellipe
 # Simulation Control
 SIM_TOTAL_TIME_US = 1000.0  # Total window 1ms
 PULSE_WIDTH_US = 300.0      # Controller turns off at 300us
-TIME_STEP_US = 1.0          # Slightly coarser for animation speed
-ANIMATION_FRAMES = 60       # Number of frames to render in animation
+TIME_STEP_US = 1.0          # Time step for physics
+ANIMATION_FRAMES = 50       # Frames for animation (kept moderate for speed)
 
 # Magnet Parameters (Alnico 5)
 MAG_DIAMETER_MM = 4.75
@@ -120,8 +120,7 @@ class MagnetHysteresis:
         self.k = 5.0 / Hc
 
     def update(self, H_applied):
-        # We assume H_applied is trying to flip the magnet (negative direction)
-        # Using a simplified major loop envelope
+        # M_up and M_down for major loop envelope
         M_up = self.Ms * np.tanh(self.k * (H_applied + self.Hc))
         M_down = self.Ms * np.tanh(self.k * (H_applied - self.Hc))
 
@@ -138,7 +137,7 @@ class MagnetHysteresis:
 # ==========================================
 print("--- Pre-calculating Unit Field Maps ---")
 # Define Grid
-GRID_RES = 35 # Resolution
+GRID_RES = 30 # Slightly lower res for smoother animation
 z_vec = np.linspace(-0.02, 0.02, GRID_RES)
 r_vec = np.linspace(0, 0.015, GRID_RES)
 Z_grid, R_grid = np.meshgrid(z_vec, r_vec)
@@ -148,7 +147,6 @@ eff_coil_R = MAG_RADIUS + (WIRE_DIAM_MM/1000 * LAYERS)/2
 Br_unit_coil, Bz_unit_coil = solenoid_field_map(1.0, TOTAL_TURNS, eff_coil_R, MAG_LEN_M, R_grid, Z_grid)
 
 # 2. Magnet Unit Map (Equivalent Current for 1 Tesla Magnetization)
-# I_equiv = (M * L) / mu0. For M=1, I = L/mu0
 I_equiv_unit = (1.0 / MU0) * MAG_LEN_M
 Br_unit_mag, Bz_unit_mag = solenoid_field_map(I_equiv_unit, 50, MAG_RADIUS, MAG_LEN_M, R_grid, Z_grid)
 
@@ -162,6 +160,7 @@ magnet = MagnetHysteresis(MAG_SAT_M, MAG_HC_A_M)
 
 t_eval = np.arange(0, SIM_TOTAL_TIME_US, TIME_STEP_US) * 1e-6
 results_I = []
+results_V = []
 results_M = []
 results_H = []
 
@@ -195,14 +194,23 @@ for t in t_eval:
     M_curr = magnet.update(H_coil_center)
 
     results_I.append(I)
+    results_V.append(V_cap)
     results_M.append(M_curr * MU0) # Store as Tesla
     results_H.append(H_coil_center)
 
 results_I = np.array(results_I)
+results_V = np.array(results_V)
 results_M = np.array(results_M)
+results_H = np.array(results_H)
 time_us = t_eval * 1e6
 
-print(f"Peak Current: {np.max(results_I):.2f} A")
+peak_I = np.max(results_I)
+peak_time = time_us[np.argmax(results_I)]
+energy_init = 0.5 * CAPACITANCE * VOLTAGE_INIT**2
+energy_final = 0.5 * CAPACITANCE * results_V[-1]**2
+energy_used = energy_init - energy_final
+
+print(f"Peak Current: {peak_I:.2f} A")
 print(f"Magnet Flip: {results_M[0]:.2f}T -> {results_M[-1]:.2f}T")
 
 # ==========================================
@@ -210,97 +218,167 @@ print(f"Magnet Flip: {results_M[0]:.2f}T -> {results_M[-1]:.2f}T")
 # ==========================================
 print("--- Initializing Animation ---")
 
-fig = plt.figure(figsize=(15, 12))
-gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 0.8])
+fig = plt.figure(figsize=(16, 10))
+gs = fig.add_gridspec(2, 3)
 
-# Field Plots
+# --- Top Row: Field Visualizations ---
 ax_coil = fig.add_subplot(gs[0, 0])
 ax_mag = fig.add_subplot(gs[0, 1])
 ax_comb = fig.add_subplot(gs[0, 2])
-for ax, title in zip([ax_coil, ax_mag, ax_comb], ['Coil Field (Opposing)', 'Magnet Field', 'Combined Field']):
-    ax.set_title(title)
-    ax.set_aspect('equal')
-    ax.set_xticks([])
-    ax.set_yticks([])
 
-# Dynamics Plots
-ax_dyn = fig.add_subplot(gs[1, :])
-line_I, = ax_dyn.plot([], [], 'r', label='Current (A)')
-ax_dyn.set_xlim(0, SIM_TOTAL_TIME_US)
-ax_dyn.set_ylim(-1, np.max(results_I)*1.1)
-ax_dyn.set_ylabel('Current [A]')
-ax_dyn.legend(loc='upper left')
+# Setup Heatmaps (Magnitude)
+# Using 'inferno' for high contrast magnitude map
+kw = dict(shading='auto', cmap='inferno', vmin=0, vmax=1.5)
 
-ax_mag_dyn = ax_dyn.twinx()
-line_M, = ax_mag_dyn.plot([], [], 'g', label='Magnetization (T)')
-ax_mag_dyn.set_ylim(-1.5, 1.5)
-ax_mag_dyn.set_ylabel('Magnetization [T]')
-ax_mag_dyn.legend(loc='upper right')
+# Initial State
+# Coil
+factor_coil = -results_I[0]
+Br_c = Br_unit_coil * factor_coil
+Bz_c = Bz_unit_coil * factor_coil
+Bmag_c = np.sqrt(Br_c**2 + Bz_c**2)
+mesh_coil = ax_coil.pcolormesh(Z_grid*1000, R_grid*1000, Bmag_c, **kw)
+ax_coil.set_title("Coil Field Magnitude")
 
-# Initialize Heatmaps
-# We use vmin/vmax to keep scale constant (user requested max 1.5T)
-kw = dict(shading='auto', cmap='bwr', vmin=-1.5, vmax=1.5)
-
-# Initial Data (t=0)
-Br_c = Br_unit_coil * (-results_I[0]) # Note Negative sign for opposing field
-Bz_c = Bz_unit_coil * (-results_I[0])
-B_c_mag = Bz_c # Visualize Bz component primarily for polarity color
-mesh_coil = ax_coil.pcolormesh(Z_grid*1000, R_grid*1000, B_c_mag, **kw)
-
+# Magnet
 Br_m = Br_unit_mag * results_M[0]
 Bz_m = Bz_unit_mag * results_M[0]
-mesh_mag = ax_mag.pcolormesh(Z_grid*1000, R_grid*1000, Bz_m, **kw)
+Bmag_m = np.sqrt(Br_m**2 + Bz_m**2)
+mesh_mag = ax_mag.pcolormesh(Z_grid*1000, R_grid*1000, Bmag_m, **kw)
+ax_mag.set_title("Magnet Field Magnitude")
 
+# Combined
 Br_t = Br_c + Br_m
 Bz_t = Bz_c + Bz_m
-mesh_comb = ax_comb.pcolormesh(Z_grid*1000, R_grid*1000, Bz_t, **kw)
+Bmag_t = np.sqrt(Br_t**2 + Bz_t**2)
+mesh_comb = ax_comb.pcolormesh(Z_grid*1000, R_grid*1000, Bmag_t, **kw)
+ax_comb.set_title("Combined Field Magnitude")
+
+# Add colorbar for reference
+fig.colorbar(mesh_comb, ax=ax_comb, label='Field Strength [T]')
 
 # Geometry Overlays
 for ax in [ax_coil, ax_mag, ax_comb]:
-    # Magnet
     ax.add_patch(plt.Rectangle((-MAG_LENGTH_MM/2, 0), MAG_LENGTH_MM, MAG_RADIUS*1000,
-                 ec='black', fc='none', lw=1))
-    # Coil
+                 ec='cyan', fc='none', lw=1.5, ls='-'))
     ax.add_patch(plt.Rectangle((-MAG_LENGTH_MM/2, MAG_RADIUS*1000), MAG_LENGTH_MM, 2,
                  ec='orange', fc='none', ls='--', lw=1))
+    ax.set_aspect('equal')
+    ax.set_xlabel('Z [mm]')
+    ax.set_ylabel('R [mm]')
+
+# --- Bottom Row: Stats & Dynamics ---
+
+# 1. Circuit Dynamics
+ax_dyn = fig.add_subplot(gs[1, 0])
+line_I, = ax_dyn.plot([], [], 'r-', label='Current (A)', linewidth=2)
+ax_dyn.set_xlim(0, SIM_TOTAL_TIME_US)
+ax_dyn.set_ylim(-1, peak_I * 1.2)
+ax_dyn.set_xlabel('Time [$\mu$s]')
+ax_dyn.set_ylabel('Current [A]', color='r')
+ax_dyn.grid(True, alpha=0.3)
+
+ax_volt = ax_dyn.twinx()
+line_V, = ax_volt.plot([], [], 'b--', label='Voltage (V)')
+ax_volt.set_ylim(0, VOLTAGE_INIT * 1.1)
+ax_volt.set_ylabel('Voltage [V]', color='b')
+ax_dyn.set_title("Circuit Dynamics")
+
+# 2. Hysteresis Loop
+ax_hys = fig.add_subplot(gs[1, 1])
+# Static plot of the full trajectory
+ax_hys.plot(results_H/1000, results_M, color='gray', linestyle='--', alpha=0.5)
+# Moving dot
+point_hys, = ax_hys.plot([], [], 'ro', markersize=8)
+ax_hys.set_xlabel('Applied Field H [kA/m]')
+ax_hys.set_ylabel('Magnetization M [T]')
+ax_hys.set_title("Magnet Hysteresis Trajectory")
+ax_hys.grid(True)
+ax_hys.axvline(0, color='k', linewidth=0.5)
+ax_hys.axhline(0, color='k', linewidth=0.5)
+
+# 3. Stats Box
+ax_stats = fig.add_subplot(gs[1, 2])
+ax_stats.axis('off')
+stats_template = (
+    "SIMULATION STATISTICS\n"
+    "---------------------\n"
+    "Time: {time:.1f} $\mu$s\n\n"
+    "Current (I): {curr:.2f} A\n"
+    "Voltage (V): {volt:.1f} V\n"
+    "Pulse Energy: {energy:.2f} J\n\n"
+    "Magnet State:\n"
+    "  H_applied: {happ:.1f} kA/m\n"
+    "  Magnetization: {mag:.2f} T\n"
+    "  Polarity: {pol}\n\n"
+    "Status: {status}"
+)
+stats_text = ax_stats.text(0.05, 0.95, "", transform=ax_stats.transAxes,
+                          fontsize=11, verticalalignment='top', fontfamily='monospace',
+                          bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
 
 def update(frame):
-    # Map frame to simulation index
+    # Determine index
     idx = int((frame / ANIMATION_FRAMES) * len(t_eval))
     if idx >= len(t_eval): idx = len(t_eval) - 1
 
-    # Get physical values
+    t_now = time_us[idx]
     curr_I = results_I[idx]
+    curr_V = results_V[idx]
     curr_M = results_M[idx]
+    curr_H = results_H[idx]
 
-    # Calculate Fields (Scaling)
-    # Coil is opposing -> Multiply by -I
+    # 1. Update Heatmaps
+    # Coil
     factor_coil = -curr_I
+    Br_c = Br_unit_coil * factor_coil
     Bz_c = Bz_unit_coil * factor_coil
+    Bmag_c = np.sqrt(Br_c**2 + Bz_c**2)
+    mesh_coil.set_array(Bmag_c.ravel())
 
     # Magnet
+    Br_m = Br_unit_mag * curr_M
     Bz_m = Bz_unit_mag * curr_M
+    Bmag_m = np.sqrt(Br_m**2 + Bz_m**2)
+    mesh_mag.set_array(Bmag_m.ravel())
 
     # Combined
+    Br_t = Br_c + Br_m
     Bz_t = Bz_c + Bz_m
+    Bmag_t = np.sqrt(Br_t**2 + Bz_t**2)
+    mesh_comb.set_array(Bmag_t.ravel())
 
-    # Update Meshes (Flatten for set_array)
-    # Note: pcolormesh expects 1D array for set_array corresponding to the flattened grid
-    # but minus the last row/col usually. With shading='auto' dimensions match.
-    mesh_coil.set_array(Bz_c.ravel())
-    mesh_mag.set_array(Bz_m.ravel())
-    mesh_comb.set_array(Bz_t.ravel())
-
-    # Update Lines
+    # 2. Update Dynamics Lines
     line_I.set_data(time_us[:idx], results_I[:idx])
-    line_M.set_data(time_us[:idx], results_M[:idx])
+    line_V.set_data(time_us[:idx], results_V[:idx])
 
-    return mesh_coil, mesh_mag, mesh_comb, line_I, line_M
+    # 3. Update Hysteresis Dot
+    point_hys.set_data([curr_H/1000], [curr_M])
+
+    # 4. Update Stats
+    status = "PULSE ACTIVE" if t_now < PULSE_WIDTH_US else "FLYBACK/DECAY"
+    pol = "NORTH UP" if curr_M > 0 else "SOUTH UP"
+
+    txt = stats_template.format(
+        time=t_now,
+        curr=curr_I,
+        volt=curr_V,
+        energy=0.5 * CAPACITANCE * (VOLTAGE_INIT**2 - curr_V**2),
+        happ=curr_H/1000,
+        mag=curr_M,
+        pol=pol,
+        status=status
+    )
+    stats_text.set_text(txt)
+
+    return mesh_coil, mesh_mag, mesh_comb, line_I, line_V, point_hys, stats_text
 
 ani = FuncAnimation(fig, update, frames=ANIMATION_FRAMES, interval=50, blit=False)
 
-plt.suptitle("EPM Demagnetization Cycle (Blue=North, Red=South)", fontsize=16)
 plt.tight_layout()
+plt.suptitle(f"EPM Simulation: 300$\mu$s Pulse", fontsize=16)
+# Adjust subplots to make room for suptitle
+plt.subplots_adjust(top=0.92)
+
 plt.show()
 
-print("Simulation Complete. Animation running...")
+print("Animation initialized with full statistics and restored heatmaps.")
