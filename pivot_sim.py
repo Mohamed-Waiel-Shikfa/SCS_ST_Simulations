@@ -20,12 +20,14 @@ NUM_MAGS = 8            # Per cylinder
 CYL_RADIUS_MM = 5.9
 MAG_LENGTH_MM = 12.5
 MAG_DIAM_MM = 4.75
-GAP_MM = 0.5            # Initial separation
+SHELL_THICKNESS_MM = 2.0 # Plastic shell thickness
+GAP_MM = 0.5            # Initial separation (between shells)
 
 # Physical Properties
 MASS_CYLINDER = 0.05    # kg (50g)
-# Inertia for hollow cylinder approx
-INERTIA_CYLINDER = 0.5 * MASS_CYLINDER * ((CYL_RADIUS_MM+MAG_LENGTH_MM)/1000)**2
+# Inertia for hollow cylinder approx (radius increased by shell)
+R_total_mm = CYL_RADIUS_MM + MAG_LENGTH_MM + SHELL_THICKNESS_MM
+INERTIA_CYLINDER = 0.5 * MASS_CYLINDER * (R_total_mm/1000)**2
 
 # Magnet Strength
 # Dipole Moment m = M * Volume
@@ -126,7 +128,8 @@ def compute_dipole_force(p1, m1, p2, m2):
 
 def run_simulation():
     # Setup Geometry
-    R_outer_m = (CYL_RADIUS_MM + MAG_LENGTH_MM) / 1000.0
+    R_mag_tip_m = (CYL_RADIUS_MM + MAG_LENGTH_MM) / 1000.0
+    R_collision_m = R_mag_tip_m + (SHELL_THICKNESS_MM / 1000.0)
 
     # Left Body (Fixed)
     left_body = RigidBody(0, 0, 0, is_fixed=True)
@@ -134,8 +137,8 @@ def run_simulation():
     left_body.polarities = np.array([1, -1, 1, -1, 1, -1, 1, -1])
 
     # Right Body (Free)
-    # Initial separation: Tips touching + GAP
-    dist = 2 * R_outer_m + (GAP_MM / 1000.0)
+    # Initial separation: Shells touching + GAP
+    dist = 2 * R_collision_m + (GAP_MM / 1000.0)
 
     # Orientation: Mag 0 points West (pi) to face Left Body
     right_body = RigidBody(dist, 0, np.pi, is_fixed=False)
@@ -179,7 +182,8 @@ def run_simulation():
         dist_sq = np.dot(delta_pos, delta_pos)
         dist_val = np.sqrt(dist_sq)
 
-        collision_dist = 2 * R_outer_m
+        # Collision happens at Shell Radius
+        collision_dist = 2 * R_collision_m
         F_contact = np.zeros(2)
         Tau_contact = 0.0
 
@@ -194,8 +198,8 @@ def run_simulation():
             F_normal = f_normal_mag * normal
 
             # Friction (Tangential)
-            # V_contact = V_cm + omega x r
-            contact_pt_rel = -normal * R_outer_m
+            # V_contact = V_cm + omega x r (where r is collision radius)
+            contact_pt_rel = -normal * R_collision_m
             v_rot_x = -right_body.omega * contact_pt_rel[1]
             v_rot_y =  right_body.omega * contact_pt_rel[0]
             v_contact = right_body.vel + np.array([v_rot_x, v_rot_y])
@@ -234,18 +238,24 @@ print("--- Initializing Animation ---")
 
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.set_aspect('equal')
-# Adjust view for smaller geometry
+# Adjust view for geometry
 ax.set_xlim(-0.04, 0.08)
 ax.set_ylim(-0.05, 0.05)
 ax.grid(True, alpha=0.3)
-ax.set_title("EPM Pivot Dynamics: T=1.0s Polarity Flip")
+ax.set_title("EPM Pivot Dynamics (2mm Plastic Shells)")
 
-# Cylinders (Chassis)
-left_circ = Circle((0, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.5, ec='black')
-ax.add_patch(left_circ)
+# Chassis (Core)
+left_core = Circle((0, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.9, ec='black')
+ax.add_patch(left_core)
+right_core = Circle((0, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.9, ec='black')
+ax.add_patch(right_core)
 
-right_circ = Circle((0.04, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.5, ec='black')
-ax.add_patch(right_circ)
+# Shells (Plastic)
+R_shell_m = (CYL_RADIUS_MM + MAG_LENGTH_MM + SHELL_THICKNESS_MM) / 1000.0
+left_shell = Circle((0, 0), R_shell_m, color='orange', alpha=0.2, ec='orange', linestyle='--')
+ax.add_patch(left_shell)
+right_shell = Circle((0, 0), R_shell_m, color='orange', alpha=0.2, ec='orange', linestyle='--')
+ax.add_patch(right_shell)
 
 # Magnets
 mag_patches_L = []
@@ -260,7 +270,6 @@ for i in range(NUM_MAGS):
     mx = L_r * np.cos(L_angs[i])
     my = L_r * np.sin(L_angs[i])
     c = 'red' if L_pols[i] > 0 else 'blue'
-    # Width=Length(12.5mm), Height=Diam(4.75mm)
     rect = Rectangle((mx - 0.00625, my - 0.002375), 0.0125, 0.00475,
                      angle=np.degrees(L_angs[i]), rotation_point='center',
                      color=c, ec='black', lw=0.5)
@@ -282,8 +291,9 @@ def update(frame):
     rtheta = hist['rtheta'][frame]
     t = hist['t'][frame]
 
-    # Update Right Cylinder Body
-    right_circ.set_center((rx, ry))
+    # Update Right Body
+    right_core.set_center((rx, ry))
+    right_shell.set_center((rx, ry))
 
     # Update Right Magnets
     mag_r = (CYL_RADIUS_MM + MAG_LENGTH_MM/2) / 1000.0
@@ -300,10 +310,8 @@ def update(frame):
 
         c = 'red' if pols[i] > 0 else 'blue'
 
-        # Robust rotation: Calculate bottom-left corner manually
+        # Robust rotation
         w, h = 0.0125, 0.00475
-        # Vector to corner from center: -w/2, -h/2
-        # Rotate this vector
         dx = -w/2 * np.cos(glob_ang) - (-h/2) * np.sin(glob_ang)
         dy = -w/2 * np.sin(glob_ang) + (-h/2) * np.cos(glob_ang)
 
@@ -314,7 +322,7 @@ def update(frame):
     s = "LOCKED (Attraction)" if t < FLIP_TIME else "FLIPPED (Repulsion)"
     status_text.set_text(f"Time: {t:.3f}s\nMode: {s}")
 
-    return mag_patches_R + [right_circ, status_text]
+    return mag_patches_R + [right_core, right_shell, status_text]
 
 ani = FuncAnimation(fig, update, frames=len(hist['t']), interval=20, blit=False)
 plt.show()
