@@ -10,10 +10,10 @@ from scipy.special import ellipk, ellipe
 # ==========================================
 
 # Simulation Control
-SIM_TOTAL_TIME_US = 150.0
-PULSE_WIDTH_US = 50.0
-TIME_STEP_US = 1.0
-ANIMATION_FRAMES = 50      # Reduced slightly to ensure smooth framerate with heavy calc
+SIM_TOTAL_TIME_US = 45.0
+PULSE_WIDTH_US = 30.0
+TIME_STEP_US = 1
+ANIMATION_FRAMES = 200      # Reduced slightly to ensure smooth framerate with heavy calc
 
 # Assembly Parameters
 NUM_CYLINDERS = 2
@@ -38,8 +38,8 @@ LAYERS = 3
 TURNS_PER_LAYER = 125
 TOTAL_TURNS = LAYERS * TURNS_PER_LAYER
 COIL_RESISTANCE = 4.0
-CAPACITANCE = 1e-4
-VOLTAGE_INIT = 60.0
+CAPACITANCE = 1e-5
+VOLTAGE_INIT = 30.0
 DIODE_DROP = 0.7
 
 MU0 = 4 * np.pi * 1e-7
