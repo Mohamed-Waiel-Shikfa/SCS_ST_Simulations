@@ -157,8 +157,10 @@ def run_simulation():
 
         # --- EVENT: POLARITY FLIP ---
         if abs(t - FLIP_TIME) < DT/2:
-            print(f"EVENT: Flipping Magnet at t={t:.2f}s")
-            right_body.polarities[0] = 1.0 # Flip contact magnet to N (Repulsion)
+            print(f"EVENT: Flipping Neighbor Magnet at t={t:.2f}s")
+            # Flip Neighbor Magnet (Index 1) from 1.0 to -1.0
+            # This is the magnet adjacent CCW to the contact magnet
+            right_body.polarities[1] = -1.0
 
         p1, m1 = left_body.get_magnet_states_global()
         p2, m2 = right_body.get_magnet_states_global()
@@ -301,7 +303,10 @@ def update(frame):
 
     # Polarity Logic
     pols = np.array([-1, 1, -1, 1, -1, 1, -1, 1])
-    if t >= FLIP_TIME: pols[0] = 1 # Flip contact magnet
+
+    if t >= FLIP_TIME:
+        # Flip neighbor magnet (Index 1) from 1 to -1
+        pols[1] = -1
 
     for i in range(NUM_MAGS):
         glob_ang = local_angs[i] + rtheta
@@ -319,7 +324,7 @@ def update(frame):
         mag_patches_R[i].set_angle(np.degrees(glob_ang))
         mag_patches_R[i].set_facecolor(c)
 
-    s = "LOCKED (Attraction)" if t < FLIP_TIME else "FLIPPED (Repulsion)"
+    s = "LOCKED (Attraction)" if t < FLIP_TIME else "PIVOT (Asymmetric)"
     status_text.set_text(f"Time: {t:.3f}s\nMode: {s}")
 
     return mag_patches_R + [right_core, right_shell, status_text]
