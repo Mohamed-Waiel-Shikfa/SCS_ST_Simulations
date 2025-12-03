@@ -9,8 +9,8 @@ from matplotlib.patches import Rectangle, Circle
 
 # Time Settings
 DT = 0.001              # 1ms timestep for stability
-TOTAL_TIME = 3.0        # Seconds
-FLIP_TIME = 1.0         # Time when polarity flips
+FRAME_DURATION = 0.5    # Seconds per frame
+# FRAME_DURATION = 0.2    # Seconds per frame
 ANIMATION_SKIP = 20     # Render every Nth frame
 
 # Geometry
@@ -22,6 +22,107 @@ MAG_LENGTH_MM = 12.5
 MAG_DIAM_MM = 4.75
 SHELL_THICKNESS_MM = 2.0 # Plastic shell thickness
 GAP_MM = 0.5            # Initial separation (between shells)
+
+# --- POLARITY FRAMES CONFIGURATION ---
+# Each frame is an array of 16 values (Indices 0-15)
+# Indices 0-7: Left Cylinder (Fixed)
+# Indices 8-15: Right Cylinder (Dynamic)
+# Value 1.0 = North (Red), -1.0 = South (Blue)
+
+POLARITY_FRAMES = [
+    # FRAME 0: Standard Attraction (Locked)
+    np.array([
+        # Left Body (0-7): N, S, N, S...
+        1, -1, 1, -1, 1, -1, 1, -1,
+        # Right Body (8-15): S, N, S, N... (Opposite to Left at contact)
+        -1, 1, -1, 1, -1, 1, -1, 1
+    ]),
+
+    # FRAME 1: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # We flip Index 9 (Right Index 1) from 1 to -1
+    np.array([
+        # Left Body (0-7): Unchanged
+        1, -1, 1, -1, 1, -1, 1, -1,
+        # Right Body (8-15): Index 1 flipped
+        -1, -1, -1, 1, -1, 1, -1, 1
+    ]),
+
+    # # FRAME 2: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+
+    # # FRAME 3: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, -1, 1, -1, 1, -1, -1
+    # ]),
+
+    # # FRAME 4: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, -1, 1, -1, 1, 1, 1
+    # ]),
+
+    # # FRAME 5: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, -1, 1, -1, -1, -1, 1
+    # ]),
+
+    # # FRAME 6: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, -1, 1, 1, 1, -1, 1
+    # ]),
+
+    # # FRAME 7: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, -1, -1, -1, 1, -1, 1
+    # ]),
+
+    # # FRAME 8: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     # Left Body (0-7): Unchanged
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     # Right Body (8-15): Index 1 flipped
+    #     -1, 1, 1, 1, -1, 1, -1, 1
+    # ]),
+
+    # FRAME 9: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
+    # We flip Index 9 (Right Index 1) from 1 to -1
+    np.array([
+        # Left Body (0-7): Unchanged
+        1, -1, 1, -1, 1, -1, 1, -1,
+        # Right Body (8-15): Index 1 flipped
+        -1, 1, -1, 1, -1, 1, -1, 1
+    ]),
+
+    # Add more frames here...
+]
+
+TOTAL_TIME = len(POLARITY_FRAMES) * FRAME_DURATION
 
 # Physical Properties
 MASS_CYLINDER = 0.05    # kg (50g)
@@ -133,34 +234,32 @@ def run_simulation():
 
     # Left Body (Fixed)
     left_body = RigidBody(0, 0, 0, is_fixed=True)
-    # Pattern: NSNS... (Mag 0 is N=+1)
-    left_body.polarities = np.array([1, -1, 1, -1, 1, -1, 1, -1])
-
     # Right Body (Free)
     # Initial separation: Shells touching + GAP
     dist = 2 * R_collision_m + (GAP_MM / 1000.0)
-
     # Orientation: Mag 0 points West (pi) to face Left Body
     right_body = RigidBody(dist, 0, np.pi, is_fixed=False)
-    # Pattern: SNSN... (Mag 0 is S=-1) -> Attraction at contact
-    right_body.polarities = np.array([-1, 1, -1, 1, -1, 1, -1, 1])
 
     history = {
         't': [], 'rx': [], 'ry': [], 'rtheta': []
     }
 
     time_steps = int(TOTAL_TIME / DT)
-    print(f"Simulating {TOTAL_TIME}s...")
+    print(f"Simulating {TOTAL_TIME}s ({len(POLARITY_FRAMES)} frames)...")
 
     for step in range(time_steps):
         t = step * DT
 
-        # --- EVENT: POLARITY FLIP ---
-        if abs(t - FLIP_TIME) < DT/2:
-            print(f"EVENT: Flipping Neighbor Magnet at t={t:.2f}s")
-            # Flip Neighbor Magnet (Index 1) from 1.0 to -1.0
-            # This is the magnet adjacent CCW to the contact magnet
-            right_body.polarities[1] = -1.0
+        # --- POLARITY CONTROL (FRAME BASED) ---
+        frame_idx = int(t / FRAME_DURATION)
+        if frame_idx >= len(POLARITY_FRAMES):
+            frame_idx = len(POLARITY_FRAMES) - 1
+
+        current_pols = POLARITY_FRAMES[frame_idx]
+
+        # Apply polarities to bodies
+        left_body.polarities = current_pols[0:8]
+        right_body.polarities = current_pols[8:16]
 
         p1, m1 = left_body.get_magnet_states_global()
         p2, m2 = right_body.get_magnet_states_global()
@@ -241,10 +340,10 @@ print("--- Initializing Animation ---")
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.set_aspect('equal')
 # Adjust view for geometry
-ax.set_xlim(-0.04, 0.08)
-ax.set_ylim(-0.05, 0.05)
+ax.set_xlim(-0.08, 0.08)
+ax.set_ylim(-0.08, 0.08)
 ax.grid(True, alpha=0.3)
-ax.set_title("EPM Pivot Dynamics (2mm Plastic Shells)")
+ax.set_title("EPM Pivot Dynamics (Frame Control)")
 
 # Chassis (Core)
 left_core = Circle((0, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.9, ec='black')
@@ -263,18 +362,16 @@ ax.add_patch(right_shell)
 mag_patches_L = []
 mag_patches_R = []
 
-# Initialize Left Magnets
+# Initialize Left Magnets (Color placeholder, updated in loop)
 L_r = (CYL_RADIUS_MM + MAG_LENGTH_MM/2)/1000
 L_angs = np.linspace(0, 2*np.pi, NUM_MAGS, endpoint=False)
-L_pols = np.array([1, -1, 1, -1, 1, -1, 1, -1])
 
 for i in range(NUM_MAGS):
     mx = L_r * np.cos(L_angs[i])
     my = L_r * np.sin(L_angs[i])
-    c = 'red' if L_pols[i] > 0 else 'blue'
     rect = Rectangle((mx - 0.00625, my - 0.002375), 0.0125, 0.00475,
                      angle=np.degrees(L_angs[i]), rotation_point='center',
-                     color=c, ec='black', lw=0.5)
+                     color='gray', ec='black', lw=0.5)
     ax.add_patch(rect)
     mag_patches_L.append(rect)
 
@@ -297,23 +394,31 @@ def update(frame):
     right_core.set_center((rx, ry))
     right_shell.set_center((rx, ry))
 
-    # Update Right Magnets
+    # Determine current frame index
+    frame_idx = int(t / FRAME_DURATION)
+    if frame_idx >= len(POLARITY_FRAMES):
+        frame_idx = len(POLARITY_FRAMES) - 1
+
+    current_pols = POLARITY_FRAMES[frame_idx]
+
+    L_pols = current_pols[0:8]
+    R_pols = current_pols[8:16]
+
+    # Update Left Magnets Colors
+    for i in range(NUM_MAGS):
+        c = 'red' if L_pols[i] > 0 else 'blue'
+        mag_patches_L[i].set_facecolor(c)
+
+    # Update Right Magnets Position & Color
     mag_r = (CYL_RADIUS_MM + MAG_LENGTH_MM/2) / 1000.0
     local_angs = np.linspace(0, 2*np.pi, NUM_MAGS, endpoint=False)
-
-    # Polarity Logic
-    pols = np.array([-1, 1, -1, 1, -1, 1, -1, 1])
-
-    if t >= FLIP_TIME:
-        # Flip neighbor magnet (Index 1) from 1 to -1
-        pols[1] = -1
 
     for i in range(NUM_MAGS):
         glob_ang = local_angs[i] + rtheta
         mx = rx + mag_r * np.cos(glob_ang)
         my = ry + mag_r * np.sin(glob_ang)
 
-        c = 'red' if pols[i] > 0 else 'blue'
+        c = 'red' if R_pols[i] > 0 else 'blue'
 
         # Robust rotation
         w, h = 0.0125, 0.00475
@@ -324,10 +429,9 @@ def update(frame):
         mag_patches_R[i].set_angle(np.degrees(glob_ang))
         mag_patches_R[i].set_facecolor(c)
 
-    s = "LOCKED (Attraction)" if t < FLIP_TIME else "PIVOT (Asymmetric)"
-    status_text.set_text(f"Time: {t:.3f}s\nMode: {s}")
+    status_text.set_text(f"Time: {t:.3f}s\nFrame: {frame_idx}")
 
-    return mag_patches_R + [right_core, right_shell, status_text]
+    return mag_patches_R + mag_patches_L + [right_core, right_shell, status_text]
 
 ani = FuncAnimation(fig, update, frames=len(hist['t']), interval=20, blit=False)
 plt.show()
