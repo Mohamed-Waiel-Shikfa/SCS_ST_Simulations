@@ -9,18 +9,65 @@ from scipy.special import ellipk, ellipe
 # 1. CONFIGURATION & PARAMETERS
 # ==========================================
 
-# Simulation Control
-SIM_TOTAL_TIME_US = 45.0
-PULSE_WIDTH_US = 30.0
-TIME_STEP_US = 1
-ANIMATION_FRAMES = 200      # Reduced slightly to ensure smooth framerate with heavy calc
+# Time Settings (Microseconds for Pulse Physics)
+FRAME_DURATION_US = 100.0   # Duration of one frame window
+PULSE_WIDTH_US = 50.0       # Active pulse duration within frame
+TIME_STEP_US = 1.0
+ANIMATION_SKIP = 5          # Render every Nth frame
 
-# Assembly Parameters
+# Geometry
 NUM_CYLINDERS = 2
 MAGS_PER_CYL = 8
 TOTAL_MAGS = NUM_CYLINDERS * MAGS_PER_CYL
-CYL_RADIUS_MM = 12.0
+CYL_RADIUS_MM = 8.0
 CYL_GAP_MM = 0.5
+
+# --- COIL CONTROL SEQUENCES ---
+# Each frame defines the state of the 16 coils:
+#  1 : Pulse North
+# -1 : Pulse South
+#  0 : OFF (Coil open circuit)
+# Indices 0-7: Left Cylinder, 8-15: Right Cylinder
+
+COIL_SEQUENCE = [
+    np.array([
+         0,  0,  0,  0,  0,  0,  0,  0,  # Left coils OFF
+         0, 0,  0,  0,  0,  0,  0,  0   # Right: Only Mag 9 pulses South
+    ]),
+
+    # FRAME 0: INITIALIZATION
+    # Fire ALL coils to set the robust "Attraction/Locked" pattern.
+    np.array([
+        # Left (0-7): N, S, N, S...
+         1, -1,  1, -1,  1, -1,  1, -1,
+        # Right (8-15): S, N, S, N... (Matches Left for attraction)
+        -1,  1, -1,  1, -1,  1, -1,  1
+    ]),
+
+    np.array([
+         0,  0,  0,  0,  0,  0,  0,  0,  # Left coils OFF
+         1, -1,  0,  0,  0,  0,  0,  0   # Right: Only Mag 9 pulses South
+    ]),
+
+    np.array([
+         0,  0,  0,  0,  0,  0,  0,  0,  # Left coils OFF
+         0, 0,  0,  0,  0,  0,  0,  0   # Right: Only Mag 9 pulses South
+    ]),
+
+    np.array([
+         0,  0,  0,  0,  0,  0,  0,  0,  # Left coils OFF
+         -1, 1,  0,  0,  0,  0,  0,  0   # Right: Only Mag 9 pulses South
+    ]),
+
+    np.array([
+         0,  0,  0,  0,  0,  0,  0,  0,  # Left coils OFF
+         0, 0,  0,  0,  0,  0,  0,  0   # Right: Only Mag 9 pulses South
+    ]),
+]
+
+# Total Simulation Time
+SIM_TOTAL_TIME_US = len(COIL_SEQUENCE) * FRAME_DURATION_US
+SIM_STEPS = int(SIM_TOTAL_TIME_US / TIME_STEP_US)
 
 # Magnet Parameters (Alnico 5)
 MAG_DIAMETER_MM = 4.75
@@ -38,7 +85,7 @@ LAYERS = 3
 TURNS_PER_LAYER = 125
 TOTAL_TURNS = LAYERS * TURNS_PER_LAYER
 COIL_RESISTANCE = 4.0
-CAPACITANCE = 1e-5
+CAPACITANCE = 1e-3
 VOLTAGE_INIT = 30.0
 DIODE_DROP = 0.7
 
@@ -49,14 +96,13 @@ MU0 = 4 * np.pi * 1e-7
 # ==========================================
 
 def loop_field(r, z, R, I):
-    """Calculate B-field (Br, Bz) of a single current loop off-axis."""
+    """Calculate B-field (Bz) of a single current loop off-axis."""
     epsilon = 1e-9
     r = np.atleast_1d(r)
     z = np.atleast_1d(z)
 
     alpha = r / R
     beta = z / R
-    gamma = z / (r + epsilon)
 
     Q = (1 + alpha)**2 + beta**2
     k2 = (4 * alpha) / Q
@@ -66,57 +112,36 @@ def loop_field(r, z, R, I):
     E = ellipe(k2)
 
     C = (MU0 * I) / (2 * np.pi * R * np.sqrt(Q))
-
     term1 = (1 - alpha**2 - beta**2) / ((1 - alpha)**2 + beta**2)
     Bz = C * (E * term1 + K)
 
-    # Simple Br for now to save compute (we focus on Bz for heatmap)
-    Br = np.zeros_like(r)
-    # (Full Br calculation omitted for speed in pre-calc, as Bz is dominant for polarity vis)
-
-    return Br, Bz
+    return Bz
 
 def get_magnet_field_on_grid(mag_idx, centers, angles, X_grid, Y_grid):
-    """
-    Compute the Bz field contribution of one magnet on the global 2D grid.
-    Rotates the grid points into the magnet's local frame.
-    """
+    """Compute Bz field contribution of one magnet on global grid."""
     mx, my = centers[mag_idx]
     theta = angles[mag_idx]
 
-    # 1. Shift Grid to Magnet Center
+    # Shift & Rotate to Magnet Frame
     dx = X_grid - mx
     dy = Y_grid - my
-
-    # 2. Rotate Grid to Magnet Frame (Magnet Axis along X')
-    # Local X' is axial, Local Y' is radial
-    # Rotate by -theta
     c, s = np.cos(-theta), np.sin(-theta)
     x_local = dx * c - dy * s
     y_local = dx * s + dy * c
 
-    # 3. Compute Field in Local Frame (Treating x_local as Z_axial, y_local as R_radial)
-    # We approximate the magnet as a solenoid current sheet
-    # I_equiv for 1 Tesla Magnetization = L/mu0
+    # Compute Field
     I_equiv = (1.0 / MU0) * MAG_LEN_M
-
-    # Discretize length
-    slices = 10 # Lower resolution for matrix pre-calc speed
+    slices = 8 # Optimized for speed
     dI = I_equiv / slices
-
-    Bz_local_acc = np.zeros_like(X_grid)
-
-    z_positions = np.linspace(-MAG_LEN_M/2, MAG_LEN_M/2, slices)
-
-    # We take absolute value of y_local because calculating Br/Bz depends on distance from axis (R)
+    Bz_acc = np.zeros_like(X_grid)
+    z_pos = np.linspace(-MAG_LEN_M/2, MAG_LEN_M/2, slices)
     r_local = np.abs(y_local)
 
-    for z_pos in z_positions:
-        dz = x_local - z_pos
-        _, bz = loop_field(r_local, dz, MAG_RADIUS_M, dI)
-        Bz_local_acc += bz
+    for z in z_pos:
+        dz = x_local - z
+        Bz_acc += loop_field(r_local, dz, MAG_RADIUS_M, dI)
 
-    return Bz_local_acc
+    return Bz_acc
 
 # ==========================================
 # 3. ASSEMBLY & PRE-CALCULATION
@@ -126,7 +151,6 @@ class MagnetAssembly:
     def __init__(self):
         self.centers = np.zeros((TOTAL_MAGS, 2))
         self.angles = np.zeros(TOTAL_MAGS)
-        self.polarity_sign = np.zeros(TOTAL_MAGS)
 
         R_center = CYL_RADIUS_MM + MAG_LENGTH_MM/2
         R_outer = CYL_RADIUS_MM + MAG_LENGTH_MM
@@ -141,71 +165,47 @@ class MagnetAssembly:
             if cyl_idx == 0: # Left
                 theta = mag_idx * theta_step
                 cx, cy = c1_x, 0
-                pat = 1 if mag_idx % 2 == 0 else -1
             else: # Right
                 theta = np.pi + mag_idx * theta_step
                 cx, cy = c2_x, 0
-                pat = -1 if mag_idx % 2 == 0 else 1
 
             self.centers[i] = [cx + R_center * np.cos(theta), cy + R_center * np.sin(theta)]
             self.angles[i] = theta
-            self.polarity_sign[i] = pat
 
 assembly = MagnetAssembly()
 
-# --- PRE-CALCULATION OF FIELD MAPS ---
-print("--- Pre-calculating Global Field Maps (This might take a moment) ---")
+# --- PRE-CALCULATION ---
+print("--- Pre-calculating Global Field Maps ---")
 
-# Define Global Grid (mm)
 GRID_W, GRID_H = 60, 30
-RES_X, RES_Y = 100, 60 # Resolution
+RES_X, RES_Y = 100, 60
 x_vec = np.linspace(-GRID_W, GRID_W, RES_X)
 y_vec = np.linspace(-GRID_H, GRID_H, RES_Y)
-X_grid, Y_grid = np.meshgrid(x_vec, y_vec) # coords in mm
+X_grid, Y_grid = np.meshgrid(x_vec, y_vec)
 
-# Convert to meters for physics
 X_grid_m = X_grid / 1000.0
 Y_grid_m = Y_grid / 1000.0
 centers_m = assembly.centers / 1000.0
 
-# Store unit map for each magnet: Shape (16, RES_Y, RES_X)
 UNIT_MAPS = np.zeros((TOTAL_MAGS, RES_Y, RES_X))
-
 for i in range(TOTAL_MAGS):
-    # Calculate map for Magnet i with M = 1T
     UNIT_MAPS[i] = get_magnet_field_on_grid(i, centers_m, assembly.angles, X_grid_m, Y_grid_m)
 
-# Calculate COIL unit maps as well?
-# We assume coils are wrapped around magnets.
-# So Coil Field ~ Magnet Field shape (approx) but proportional to Current I.
-# We can reuse UNIT_MAPS scaled by (mu0 * N * I / L) / (M_unit) logic.
-# Scaling Factor: M_eff_coil = (N*I/L) * mu0.
-# Since UNIT_MAPS is for M=1T (mu0*H=1),
-# Coil Contribution = UNIT_MAPS * (N*I/L * mu0)
-
 print("--- Computing Coupling Matrices ---")
-# Re-using the simpler dipole/projection logic for the physics loop G-matrix
-# to ensure stability, distinct from the heatmap visualization.
-
 def get_field_at_point_physics(x, y, source_idx):
-    # Simplified interaction for physics loop (dipole approx)
     sx, sy = centers_m[source_idx]
     stheta = assembly.angles[source_idx]
     dx, dy = x - sx, y - sy
-
-    # Rotate to source frame
     c, s = np.cos(-stheta), np.sin(-stheta)
     dx_l, dy_l = dx*c - dy*s, dx*s + dy*c
     r = np.sqrt(dx_l**2 + dy_l**2)
     if r < 1e-6: return 0, 0
 
     vol = np.pi * MAG_RADIUS_M**2 * MAG_LEN_M
-    m = 1.0 * vol # Unit M
+    m = 1.0 * vol
     fac = (MU0 * m) / (4 * np.pi * r**3)
     bx = fac * (3*(dx_l/r)**2 - 1)
     by = fac * (3*(dx_l/r)*(dy_l/r))
-
-    # Rotate back
     cb, sb = np.cos(stheta), np.sin(stheta)
     return bx*cb - by*sb, bx*sb + by*cb
 
@@ -229,8 +229,10 @@ class SystemHysteresis:
         self.Hc = MAG_HC_A_M
         self.M = np.zeros(count)
         self.k = 5.0 / self.Hc
+        # Initialize with Frame 0 pattern
+        init_pattern = COIL_SEQUENCE[0]
         for k in range(count):
-            self.M[k] = (MAG_BR_T / MU0) * assembly.polarity_sign[k]
+            self.M[k] = (MAG_BR_T / MU0) * init_pattern[k]
 
     def update(self, H_coils):
         H_int = G_matrix @ self.M
@@ -240,224 +242,253 @@ class SystemHysteresis:
         self.M = np.clip(self.M, M_down, M_up)
         return self.M, H_int
 
-print("--- Running Simulation ---")
+print(f"--- Running Simulation ({SIM_TOTAL_TIME_US} us) ---")
 
 sys_model = SystemHysteresis(TOTAL_MAGS)
-coil_polarity_vec = -1.0 * assembly.polarity_sign
 
-t_eval = np.arange(0, SIM_TOTAL_TIME_US, TIME_STEP_US) * 1e-6
-results_I = []
-results_V = []
-results_M_0 = []
-results_M_1 = []
-results_Hint_0 = []
+# Output Containers
+results = {
+    't': [], 'I_all': [], 'V': [],
+    'M_all': [],
+    'H_total_all': [], # Store H_total (Coil + Int) for proper B-H loops
+    'frame': []
+}
 
 Q_cap = VOLTAGE_INIT * CAPACITANCE
-I = 0.0
-L_sys = (MU0 * (TOTAL_TURNS**2) * (np.pi*(MAG_RADIUS_M*1.1)**2)) / MAG_LEN_M # Single coil approx
+I_single_coil = 0.0
+L_single = (MU0 * (TOTAL_TURNS**2) * (np.pi*(MAG_RADIUS_M*1.1)**2)) / MAG_LEN_M
 
-for t in t_eval:
-    t_us = t * 1e6
-    dt = TIME_STEP_US * 1e-6
+current_frame_idx = -1
+
+for step in range(SIM_STEPS):
+    t_us = step * TIME_STEP_US
+
+    # --- FRAME LOGIC ---
+    frame_idx = int(t_us / FRAME_DURATION_US)
+    if frame_idx >= len(COIL_SEQUENCE): frame_idx = len(COIL_SEQUENCE) - 1
+
+    coil_states = COIL_SEQUENCE[frame_idx]
+    num_active_coils = np.sum(np.abs(coil_states))
+
+    # Trigger Pulse at start of frame
+    if frame_idx != current_frame_idx:
+        current_frame_idx = frame_idx
+        # Capacitor NOT recharged (continuing discharge)
+        I_single_coil = 0.0
+
+    time_in_frame_us = t_us % FRAME_DURATION_US
+
+    # --- CIRCUIT (RLC Discharge) ---
     V_cap = Q_cap / CAPACITANCE
 
-    # Circuit
-    if t_us < PULSE_WIDTH_US:
-        dIdt = (V_cap - I * COIL_RESISTANCE) / L_sys
-        dQdt = -I
+    if time_in_frame_us < PULSE_WIDTH_US:
+        dIdt = (V_cap - I_single_coil * COIL_RESISTANCE) / L_single
+        total_current_draw = I_single_coil * num_active_coils
+        dQdt = -total_current_draw
     else:
-        if I > 0:
-            dIdt = (-I * COIL_RESISTANCE - DIODE_DROP) / L_sys
+        if I_single_coil > 0:
+            dIdt = (-I_single_coil * COIL_RESISTANCE - DIODE_DROP) / L_single
             dQdt = 0
         else:
-            I = 0; dIdt = 0; dQdt = 0
+            I_single_coil = 0; dIdt = 0; dQdt = 0
 
-    I += dIdt * dt
-    Q_cap += dQdt * dt
+    I_single_coil += dIdt * (TIME_STEP_US * 1e-6)
+    Q_cap += dQdt * (TIME_STEP_US * 1e-6)
 
-    H_mag = (TOTAL_TURNS * I) / MAG_LEN_M
-    H_coils = H_mag * coil_polarity_vec
+    I_vec_all = I_single_coil * coil_states
 
+    # --- COIL CONTROL ---
+    H_mag_magnitude = (TOTAL_TURNS * I_single_coil) / MAG_LEN_M
+    H_coils = H_mag_magnitude * coil_states
+
+    # --- HYSTERESIS ---
     M_vec, H_int_vec = sys_model.update(H_coils)
 
-    results_I.append(I)
-    results_V.append(V_cap)
-    results_M_0.append(M_vec[0])
-    results_M_1.append(M_vec[1])
-    results_Hint_0.append(H_int_vec[0])
+    # Calculate Total Field for Visualization (Coil + Int)
+    H_total_vec = H_coils + H_int_vec
 
-results_I = np.array(results_I)
-results_V = np.array(results_V)
-results_M_0 = np.array(results_M_0)
-results_M_1 = np.array(results_M_1)
-results_Hint_0 = np.array(results_Hint_0)
-time_us = t_eval * 1e6
+    # --- STORAGE ---
+    if step % ANIMATION_SKIP == 0:
+        results['t'].append(t_us)
+        results['I_all'].append(I_vec_all.copy())
+        results['V'].append(V_cap)
+        results['M_all'].append(M_vec.copy())
+        results['H_total_all'].append(H_total_vec.copy()) # Store H_total
+        results['frame'].append(frame_idx)
+
+# Arrays
+for k in results: results[k] = np.array(results[k])
 
 # ==========================================
-# 5. VISUALIZATION (Old Format Restored)
+# 5. VISUALIZATION
 # ==========================================
-
 print("--- Initializing Visualization ---")
 
-# Custom Colormap (Blue-Black-Red)
 colors = [(0, 0, 1), (0, 0, 0), (1, 0, 0)]
 cm = LinearSegmentedColormap.from_list('bk_bwr', colors, N=100)
 
 fig = plt.figure(figsize=(16, 10))
 gs = fig.add_gridspec(2, 3)
 
-# --- Top Row: Massive Heatmap of 16-Magnet Assembly ---
+# Heatmap
 ax_map = fig.add_subplot(gs[0, :])
-
-# Initial Field Calculation (Summation)
-# M_field = sum(UNIT_MAPS[i] * M[i])
-# Coil_field = sum(UNIT_MAPS[i] * Coil_Factor[i])
-# Total = M_field + Coil_field
-
-# Note: Coil factor per magnet = (N*I/L * mu0) / 1T * polarity
-coil_scale_factor = (MU0 * TOTAL_TURNS / MAG_LEN_M)
-
-def compute_total_grid(idx):
-    I_curr = results_I[idx]
-
-    # Reconstruct M for all magnets based on symmetry assumption
-    # (Mag 0 pattern or Mag 1 pattern)
-    m0 = results_M_0[idx]
-    m1 = results_M_1[idx]
-
-    # Accumulator
-    Total_Grid = np.zeros((RES_Y, RES_X))
-
-    for i in range(TOTAL_MAGS):
-        # 1. Magnet Contribution
-        orig_sign = assembly.polarity_sign[i]
-        M_val = m0 if orig_sign > 0 else m1
-
-        # 2. Coil Contribution
-        # Coil opposes original sign
-        H_coil_val = (TOTAL_TURNS * I_curr / MAG_LEN_M) * (-orig_sign)
-        M_coil_equiv = H_coil_val * MU0
-
-        # Total "Source" strength (Magnet M + Equivalent Coil M)
-        # Note: UNIT_MAPS are for M=1T. So we scale by Tesla.
-        Source_T = (M_val * MU0) + M_coil_equiv
-
-        Total_Grid += UNIT_MAPS[i] * Source_T
-
-    return Total_Grid
-
-B_init = compute_total_grid(0)
-# Use Vmin/Vmax to keep Black at 0
-mesh_map = ax_map.pcolormesh(X_grid, Y_grid, B_init, shading='auto', cmap=cm, vmin=-1.5, vmax=1.5)
+mesh_map = ax_map.pcolormesh(X_grid, Y_grid, np.zeros_like(X_grid), shading='auto', cmap=cm, vmin=-1.5, vmax=1.5)
 fig.colorbar(mesh_map, ax=ax_map, label='Field Intensity [T]')
-
-ax_map.set_title("16-EPM Magnetic Field Interactions (Real-time)", fontsize=14)
+ax_map.set_title("16-EPM Field (Coil Control)", fontsize=14)
 ax_map.set_aspect('equal')
 ax_map.set_xlim(-60, 60)
 ax_map.set_ylim(-30, 30)
-ax_map.set_xlabel('X [mm]')
-ax_map.set_ylabel('Y [mm]')
 
-# Geometry Overlays
-magnet_patches = []
+# Magnets
+mag_patches = []
+mag_labels = []
 for i in range(TOTAL_MAGS):
     cx, cy = assembly.centers[i]
     ang = assembly.angles[i]
-    # Magnet Body
     rect = Rectangle((cx - MAG_LENGTH_MM/2, cy - MAG_DIAMETER_MM/2),
                      MAG_LENGTH_MM, MAG_DIAMETER_MM, angle=np.degrees(ang),
-                     rotation_point='center', ec='white', lw=1, fc='gray', alpha=0.3)
+                     rotation_point='center', ec='white', lw=1, fc='gray')
     ax_map.add_patch(rect)
-    # Pole Indicator (Split rectangle? Complex to rotate. Just colored border/fill)
-    # We will update facecolor based on polarity
-    magnet_patches.append(rect)
+    mag_patches.append(rect)
+    ax_map.text(cx, cy, str(i), color='yellow', fontsize=8, ha='center', va='center', alpha=0.7)
 
-# --- Bottom Row: Stats & Dynamics ---
+# --- 4x4 Grid of Dynamics Plots (Coil Currents) ---
+gs_dyn = gs[1, 0].subgridspec(4, 4, wspace=0.1, hspace=0.1)
 
-# 1. Circuit Dynamics
-ax_dyn = fig.add_subplot(gs[1, 0])
-l_I, = ax_dyn.plot([], [], 'r-', label='Current (A)', lw=2)
-ax_dyn.set_xlim(0, SIM_TOTAL_TIME_US)
-ax_dyn.set_ylim(-1, np.max(results_I)*1.2)
-ax_dyn.set_xlabel('Time [us]')
-ax_dyn.set_ylabel('Current [A]', color='r')
-ax_dyn.grid(True, alpha=0.3)
+lines_I = []
+text_I = []
+axes_dyn = []
 
-ax_V = ax_dyn.twinx()
-l_V, = ax_V.plot([], [], 'b--', label='Voltage (V)')
-ax_V.set_ylim(0, VOLTAGE_INIT*1.1)
-ax_V.set_ylabel('Voltage [V]', color='b')
-ax_dyn.set_title("Circuit Dynamics")
+max_I = np.max(np.abs(results['I_all'])) + 0.5
+cmap_L = plt.cm.Reds(np.linspace(0.4, 1.0, 8))
+cmap_R = plt.cm.Blues(np.linspace(0.4, 1.0, 8))
 
-# 2. Hysteresis Loop (Contact Magnet)
-ax_hys = fig.add_subplot(gs[1, 1])
-# Interaction Field vs Magnetization
-ax_hys.plot(results_Hint_0/1000, results_M_0*MU0, 'k--', alpha=0.3, label='Trajectory')
-pt_hys, = ax_hys.plot([], [], 'ro', markersize=8)
-ax_hys.set_xlabel('Local Interaction H [kA/m]')
-ax_hys.set_ylabel('Magnetization M [T]')
-ax_hys.set_title("Hysteresis (Contact Magnet)")
-ax_hys.grid(True)
+for i in range(TOTAL_MAGS):
+    row = i // 4
+    col = i % 4
+    ax_small = fig.add_subplot(gs_dyn[row, col])
 
-# 3. Detailed Stats Box
+    c = cmap_L[i] if i < 8 else cmap_R[i-8]
+    l, = ax_small.plot([], [], lw=1.5, color=c)
+    lines_I.append(l)
+    axes_dyn.append(ax_small)
+
+    txt = ax_small.text(0.5, 0.5, "", transform=ax_small.transAxes,
+                        fontsize=8, color=c, fontweight='bold', ha='center', va='center')
+    text_I.append(txt)
+
+    ax_small.set_ylim(-max_I, max_I)
+    ax_small.set_xlim(0, SIM_TOTAL_TIME_US)
+    ax_small.set_xticks([])
+    ax_small.set_yticks([])
+    ax_small.text(0.05, 0.8, f"C#{i}", transform=ax_small.transAxes, fontsize=6, color='black', alpha=0.5)
+
+    if i == 0:
+        ax_v = ax_small.twinx()
+        l_V_ref, = ax_v.plot([], [], 'g--', lw=1, alpha=0.6)
+        ax_v.set_ylim(0, VOLTAGE_INIT*1.1)
+        ax_v.set_yticks([])
+        ax_small.text(0.5, 0.8, "V_cap", transform=ax_small.transAxes, fontsize=6, color='green')
+
+# --- 4x4 Grid of Hysteresis Plots (16 Magnets) ---
+gs_hys = gs[1, 1].subgridspec(4, 4, wspace=0.1, hspace=0.1)
+
+lines_hys = []
+points_hys = []
+text_hys = []
+
+# Hysteresis Bounds
+# H_peak coil ~ 225 kA/m. With margin for interaction, scale to 300.
+h_max = 150.0 # kA/m
+m_max = 1.6
+
+for i in range(TOTAL_MAGS):
+    row = i // 4
+    col = i % 4
+    ax_small = fig.add_subplot(gs_hys[row, col])
+
+    c = cmap_L[i] if i < 8 else cmap_R[i-8]
+    l, = ax_small.plot([], [], lw=1, color='black', alpha=0.3)
+    p, = ax_small.plot([], [], 'o', color=c, markersize=3)
+
+    lines_hys.append(l)
+    points_hys.append(p)
+
+    txt = ax_small.text(0.5, 0.5, "", transform=ax_small.transAxes,
+                        fontsize=8, color=c, fontweight='bold', ha='center', va='center')
+    text_hys.append(txt)
+
+    ax_small.set_ylim(-m_max, m_max)
+    ax_small.set_xlim(-h_max, h_max)
+    ax_small.set_xticks([])
+    ax_small.set_yticks([])
+    ax_small.grid(True, alpha=0.2)
+    ax_small.text(0.05, 0.8, f"M#{i}", transform=ax_small.transAxes, fontsize=6, color='black', alpha=0.5)
+
+# Stats
 ax_stats = fig.add_subplot(gs[1, 2])
 ax_stats.axis('off')
-stats_template = (
-    "SYSTEM STATISTICS\n"
-    "-----------------\n"
-    "Time: {time:.1f} us\n"
-    "Total Current: {curr:.1f} A\n"
-    "Cap Voltage: {volt:.1f} V\n"
-    "Energy Used: {en:.2f} J\n\n"
-    "CONTACT MAGNET (#0):\n"
-    "  Magnetization: {m0:.2f} T\n"
-    "  Stray Field: {hint:.1f} kA/m\n\n"
-    "NEIGHBOR MAGNET (#1):\n"
-    "  Magnetization: {m1:.2f} T"
-)
 txt_stats = ax_stats.text(0.05, 0.95, "", transform=ax_stats.transAxes,
                           fontsize=11, family='monospace', verticalalignment='top',
                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
 
 def update(frame):
-    idx = int((frame / ANIMATION_FRAMES) * len(t_eval))
-    if idx >= len(t_eval): idx = len(t_eval) - 1
+    # Fix IndexError: slice inclusive of current frame
+    idx = frame
+    if idx >= len(results['t']): idx = len(results['t']) - 1
 
     # 1. Update Heatmap
-    B_grid = compute_total_grid(idx)
-    mesh_map.set_array(B_grid.ravel())
+    I_vec_now = results['I_all'][idx]
+    curr_frame = int(results['frame'][idx])
 
-    # 2. Update Magnet Colors (Red=North/+M, Blue=South/-M)
-    m0 = results_M_0[idx]
-    m1 = results_M_1[idx]
+    Total_Grid = np.zeros((RES_Y, RES_X))
+    M_current_vec = results['M_all'][idx]
 
     for i in range(TOTAL_MAGS):
-        orig_sign = assembly.polarity_sign[i]
-        val = m0 if orig_sign > 0 else m1
+        M_val = M_current_vec[i]
+        H_coil_val = (TOTAL_TURNS * I_vec_now[i] / MAG_LEN_M)
+        Source_T = (M_val * MU0) + (H_coil_val * MU0)
+        Total_Grid += UNIT_MAPS[i] * Source_T
 
-        # Normalize -1.5T to 1.5T -> 0 to 1
-        norm = (val * MU0 + 1.5) / 3.0
-        c = plt.cm.bwr(np.clip(norm, 0, 1))
-        magnet_patches[i].set_facecolor(c)
-        magnet_patches[i].set_alpha(0.8) # Make solid
+        norm = (M_val * MU0 + 1.5) / 3.0
+        mag_patches[i].set_facecolor(cm(np.clip(norm, 0, 1)))
 
-    # 3. Update Plots
-    l_I.set_data(time_us[:idx], results_I[:idx])
-    l_V.set_data(time_us[:idx], results_V[:idx])
-    pt_hys.set_data([results_Hint_0[idx]/1000], [results_M_0[idx]*MU0])
+    mesh_map.set_array(Total_Grid.ravel())
 
-    # 4. Stats
-    en = 0.5 * CAPACITANCE * (VOLTAGE_INIT**2 - results_V[idx]**2)
-    txt_stats.set_text(stats_template.format(
-        time=time_us[idx], curr=results_I[idx], volt=results_V[idx], en=en,
-        m0=results_M_0[idx]*MU0, hint=results_Hint_0[idx]/1000,
-        m1=results_M_1[idx]*MU0
-    ))
+    # 2. Update Current Grid (4x4)
+    # Use :idx+1 to ensure non-empty slice
+    slice_idx = idx + 1
 
-    return [mesh_map, l_I, l_V, pt_hys, txt_stats] + magnet_patches
+    for i in range(TOTAL_MAGS):
+        lines_I[i].set_data(results['t'][:slice_idx], results['I_all'][:slice_idx, i])
+        val = I_vec_now[i]
+        text_I[i].set_text(f"{val:.1f}A")
+        text_I[i].set_alpha(1.0 if abs(val) > 0.1 else 0.3)
 
-ani = FuncAnimation(fig, update, frames=ANIMATION_FRAMES, interval=80, blit=False)
+    l_V_ref.set_data(results['t'][:slice_idx], results['V'][:slice_idx])
+
+    # 3. Update Hysteresis Grid (4x4) - Now using Total Field
+    for i in range(TOTAL_MAGS):
+        h_traj = results['H_total_all'][:slice_idx, i] / 1000.0 # kA/m
+        m_traj = results['M_all'][:slice_idx, i] * MU0          # T
+
+        lines_hys[i].set_data(h_traj, m_traj)
+        points_hys[i].set_data([h_traj[-1]], [m_traj[-1]])
+
+        m_val = m_traj[-1]
+        text_hys[i].set_text(f"{m_val:.2f}T")
+
+    # 4. Stats - Updated fields
+    curr_V = results['V'][idx]
+    en = 0.5 * CAPACITANCE * (VOLTAGE_INIT**2 - curr_V**2)
+
+    txt_stats.set_text(f"Time: {results['t'][idx]:.1f} us\n"
+                       f"Frame: {curr_frame}\n"
+                       f"Capacitor Voltage: {curr_V:.1f} V\n"
+                       f"Energy Used: {en:.4f} J")
+
+    return [mesh_map, txt_stats] + mag_patches + lines_I + text_I + lines_hys + points_hys + text_hys
+
+ani = FuncAnimation(fig, update, frames=len(results['t']), interval=30, blit=False)
 plt.tight_layout()
-plt.suptitle("16-EPM Multi-Body Simulation", fontsize=16)
-plt.subplots_adjust(top=0.92)
 plt.show()
