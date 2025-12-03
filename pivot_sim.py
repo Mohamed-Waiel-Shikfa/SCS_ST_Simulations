@@ -10,7 +10,7 @@ from matplotlib.patches import Rectangle, Circle
 # Time Settings
 DT = 0.001              # 1ms timestep for stability
 FRAME_DURATION = 0.5    # Seconds per frame
-# FRAME_DURATION = 0.2    # Seconds per frame
+# FRAME_DURATION = 0.25    # Seconds per frame
 ANIMATION_SKIP = 20     # Render every Nth frame
 
 # Geometry
@@ -23,6 +23,9 @@ MAG_DIAM_MM = 4.75
 SHELL_THICKNESS_MM = 2.0 # Plastic shell thickness
 GAP_MM = 0.5            # Initial separation (between shells)
 
+# Visualization
+FORCE_SCALE = 0.5      # Scale factor for force arrows
+
 # --- POLARITY FRAMES CONFIGURATION ---
 # Each frame is an array of 16 values (Indices 0-15)
 # Indices 0-7: Left Cylinder (Fixed)
@@ -30,96 +33,82 @@ GAP_MM = 0.5            # Initial separation (between shells)
 # Value 1.0 = North (Red), -1.0 = South (Blue)
 
 POLARITY_FRAMES = [
-    # FRAME 0: Standard Attraction (Locked)
     np.array([
-        # Left Body (0-7): N, S, N, S...
         1, -1, 1, -1, 1, -1, 1, -1,
-        # Right Body (8-15): S, N, S, N... (Opposite to Left at contact)
         -1, 1, -1, 1, -1, 1, -1, 1
     ]),
 
-    # FRAME 1: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # We flip Index 9 (Right Index 1) from 1 to -1
     np.array([
-        # Left Body (0-7): Unchanged
         1, -1, 1, -1, 1, -1, 1, -1,
-        # Right Body (8-15): Index 1 flipped
         -1, -1, -1, 1, -1, 1, -1, 1
     ]),
 
-    # # FRAME 2: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
+    # full circle start
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     1, 1, -1, 1, -1, 1, -1, 1
     # ]),
 
-    # # FRAME 3: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, -1, 1, -1, 1, -1, -1
     # ]),
 
-    # # FRAME 4: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, -1, 1, -1, 1, 1, 1
     # ]),
 
-    # # FRAME 5: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, -1, 1, -1, -1, -1, 1
     # ]),
 
-    # # FRAME 6: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, -1, 1, 1, 1, -1, 1
     # ]),
 
-    # # FRAME 7: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, -1, -1, -1, 1, -1, 1
     # ]),
 
-    # # FRAME 8: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # # We flip Index 9 (Right Index 1) from 1 to -1
     # np.array([
-    #     # Left Body (0-7): Unchanged
     #     1, -1, 1, -1, 1, -1, 1, -1,
-    #     # Right Body (8-15): Index 1 flipped
     #     -1, 1, 1, 1, -1, 1, -1, 1
     # ]),
 
-    # FRAME 9: Pivot Pattern (Flip Neighbor Magnet on Right Cylinder)
-    # We flip Index 9 (Right Index 1) from 1 to -1
+    # np.array([
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     -1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+
+    # np.array([
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     -1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+
+    # np.array([
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     -1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+
+    # np.array([
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     -1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+
+    # np.array([
+    #     1, -1, 1, -1, 1, -1, 1, -1,
+    #     -1, 1, -1, 1, -1, 1, -1, 1
+    # ]),
+    # full circle end
+
     np.array([
-        # Left Body (0-7): Unchanged
         1, -1, 1, -1, 1, -1, 1, -1,
-        # Right Body (8-15): Index 1 flipped
         -1, 1, -1, 1, -1, 1, -1, 1
     ]),
-
-    # Add more frames here...
 ]
 
 TOTAL_TIME = len(POLARITY_FRAMES) * FRAME_DURATION
@@ -241,7 +230,8 @@ def run_simulation():
     right_body = RigidBody(dist, 0, np.pi, is_fixed=False)
 
     history = {
-        't': [], 'rx': [], 'ry': [], 'rtheta': []
+        't': [], 'rx': [], 'ry': [], 'rtheta': [],
+        'forces_individual': [], 'force_net': []
     }
 
     time_steps = int(TOTAL_TIME / DT)
@@ -268,9 +258,20 @@ def run_simulation():
         F_mag_total = np.zeros(2)
         Tau_mag_total = 0.0
 
-        for i in range(NUM_MAGS):
-            for j in range(NUM_MAGS):
+        # Store individual forces for visualization
+        # Shape: (8, 2) -> Force vector on each of Right Body's magnets
+        F_individual_mag = np.zeros((NUM_MAGS, 2))
+
+        # Loop over Right Magnets (Targets)
+        for j in range(NUM_MAGS):
+            # Loop over Left Magnets (Sources)
+            for i in range(NUM_MAGS):
                 f_pair = compute_dipole_force(p1[i], m1[i], p2[j], m2[j])
+
+                # Accumulate force on magnet j
+                F_individual_mag[j] += f_pair
+
+                # Add to total body force
                 F_mag_total += f_pair
 
                 # Torque = r x F (Lever from body center)
@@ -319,13 +320,16 @@ def run_simulation():
             F_contact = F_normal + F_friction
             Tau_contact = contact_pt_rel[0]*F_friction[1] - contact_pt_rel[1]*F_friction[0]
 
-        right_body.apply_force_torque(F_mag_total + F_contact, Tau_mag_total + Tau_contact)
+        F_net_body = F_mag_total + F_contact
+        right_body.apply_force_torque(F_net_body, Tau_mag_total + Tau_contact)
 
         if step % ANIMATION_SKIP == 0:
             history['t'].append(t)
             history['rx'].append(right_body.pos[0])
             history['ry'].append(right_body.pos[1])
             history['rtheta'].append(right_body.theta)
+            history['forces_individual'].append(F_individual_mag.copy())
+            history['force_net'].append(F_net_body.copy())
 
     return history
 
@@ -343,7 +347,7 @@ ax.set_aspect('equal')
 ax.set_xlim(-0.08, 0.08)
 ax.set_ylim(-0.08, 0.08)
 ax.grid(True, alpha=0.3)
-ax.set_title("EPM Pivot Dynamics (Frame Control)")
+ax.set_title("EPM Pivot Dynamics (Forces Visualized)")
 
 # Chassis (Core)
 left_core = Circle((0, 0), CYL_RADIUS_MM/1000, color='#888888', alpha=0.9, ec='black')
@@ -381,6 +385,19 @@ for i in range(NUM_MAGS):
     ax.add_patch(rect)
     mag_patches_R.append(rect)
 
+# Force Vectors (Quiver)
+# 1. Individual Magnets (Magenta)
+# FIX: Initialize with dummy data of correct size (NUM_MAGS)
+q_ind = ax.quiver(np.zeros(NUM_MAGS), np.zeros(NUM_MAGS), np.zeros(NUM_MAGS), np.zeros(NUM_MAGS),
+                  color='magenta', scale=1/FORCE_SCALE, zorder=10, width=0.005, label='Mag Forces')
+
+# 2. Net Body Force (Green, Thick)
+# FIX: Initialize with dummy data of correct size (1)
+q_net = ax.quiver([0], [0], [0], [0],
+                  color='#00FF00', scale=1/(FORCE_SCALE*3), zorder=11, width=0.015, label='Net Body Force')
+
+ax.legend(loc='upper right')
+
 status_text = ax.text(0.05, 0.92, "", transform=ax.transAxes, fontsize=11,
                       bbox=dict(facecolor='white', alpha=0.8))
 
@@ -389,6 +406,8 @@ def update(frame):
     ry = hist['ry'][frame]
     rtheta = hist['rtheta'][frame]
     t = hist['t'][frame]
+    f_ind = hist['forces_individual'][frame] # Shape (8, 2)
+    f_net = hist['force_net'][frame]         # Shape (2,)
 
     # Update Right Body
     right_core.set_center((rx, ry))
@@ -413,10 +432,16 @@ def update(frame):
     mag_r = (CYL_RADIUS_MM + MAG_LENGTH_MM/2) / 1000.0
     local_angs = np.linspace(0, 2*np.pi, NUM_MAGS, endpoint=False)
 
+    mag_centers_x = []
+    mag_centers_y = []
+
     for i in range(NUM_MAGS):
         glob_ang = local_angs[i] + rtheta
         mx = rx + mag_r * np.cos(glob_ang)
         my = ry + mag_r * np.sin(glob_ang)
+
+        mag_centers_x.append(mx)
+        mag_centers_y.append(my)
 
         c = 'red' if R_pols[i] > 0 else 'blue'
 
@@ -429,9 +454,18 @@ def update(frame):
         mag_patches_R[i].set_angle(np.degrees(glob_ang))
         mag_patches_R[i].set_facecolor(c)
 
+    # Update Quivers
+    # Individual Forces
+    q_ind.set_offsets(np.column_stack([mag_centers_x, mag_centers_y]))
+    q_ind.set_UVC(f_ind[:, 0], f_ind[:, 1])
+
+    # Net Body Force (Origin at Center of Right Cylinder)
+    q_net.set_offsets(np.array([[rx, ry]]))
+    q_net.set_UVC([f_net[0]], [f_net[1]])
+
     status_text.set_text(f"Time: {t:.3f}s\nFrame: {frame_idx}")
 
-    return mag_patches_R + mag_patches_L + [right_core, right_shell, status_text]
+    return mag_patches_R + mag_patches_L + [right_core, right_shell, status_text, q_ind, q_net]
 
 ani = FuncAnimation(fig, update, frames=len(hist['t']), interval=20, blit=False)
 plt.show()
