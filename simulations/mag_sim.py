@@ -394,6 +394,5 @@ ani = FuncAnimation(fig, update, frames=ANIMATION_FRAMES, interval=80, blit=Fals
 plt.tight_layout()
 plt.suptitle("EPM Polarity Switch (Red/Blue Blocks = Poles)", fontsize=16)
 plt.subplots_adjust(top=0.92)
-plt.show()
-
-print("Animation initialized. Single combined field view active.")
+ani.save('mag_sim.gif', writer='pillow', fps=30)
+print("Simulation saved as epm_simulation.gif")

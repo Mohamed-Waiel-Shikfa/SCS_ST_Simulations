@@ -468,4 +468,6 @@ def update(frame):
     return mag_patches_R + mag_patches_L + [right_core, right_shell, status_text, q_ind, q_net]
 
 ani = FuncAnimation(fig, update, frames=len(hist['t']), interval=20, blit=False)
-plt.show()
+# Replace plt.show() with:
+ani.save('epm_simulation.gif', writer='pillow', fps=30)
+print("Simulation saved as epm_simulation.gif")

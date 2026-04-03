@@ -491,4 +491,5 @@ def update(frame):
 
 ani = FuncAnimation(fig, update, frames=len(results['t']), interval=30, blit=False)
 plt.tight_layout()
-plt.show()
+ani.save('mag_sim_cylinder.gif', writer='pillow', fps=30)
+print("Simulation saved as epm_simulation.gif")
