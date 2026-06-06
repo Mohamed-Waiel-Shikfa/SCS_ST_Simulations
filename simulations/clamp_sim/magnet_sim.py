@@ -7,14 +7,14 @@ from scipy.optimize import fsolve
 mu0 = 4 * np.pi * 1e-7
 g = 9.81
 
-wim = 0.01      # width in meters (10mm)
-hem = 0.01      # height in meters (10mm)
-# am = hem * wim  # Physical cross-sectional area of the magnet
-am = np.pi * (0.00475 / 2)**2  # Physical cross-sectional area of the magnet
+wim = 0.010      # width in meters (10mm)
+hem = 0.010      # height in meters (10mm)
+am = hem * wim  # Physical cross-sectional area of the magnet
+# am = np.pi * (0.00475 / 2)**2  # Physical cross-sectional area of the magnet
 
-# lm = 0.001      # length of one magnet (1.0mm)
-lm = 0.0125      # length of one magnet (12.5mm)
-lg = 0.0001     # length of the gap (1mm)
+lm = 0.001      # length of one magnet (1.0mm)
+# lm = 0.0125      # length of one magnet (12.5mm)
+lg = 0.00015     # length of the gap (1mm)
 
 # Alnico 5-7 Material Properties
 Br = 1.35       # Remanence (Tesla)
@@ -30,8 +30,8 @@ print(f"lg = {lg*1000:.4f} mm")
 # Using the effective area method for the permeance calculation
 wim_eff = wim + lg
 hem_eff = hem + lg
-# ag_eff = wim_eff * hem_eff
-ag_eff = am + lg**2
+ag_eff = wim_eff * hem_eff
+# ag_eff = am + lg**2
 
 # Total permeance of the gap including fringing
 Pt = mu0 * (ag_eff / lg)
