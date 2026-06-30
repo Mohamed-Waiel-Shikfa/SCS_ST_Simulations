@@ -1,4 +1,6 @@
 import math
+from functools import cache
+from linecache import cache
 
 import dash
 import numpy as np
@@ -74,32 +76,46 @@ J_alnico_q2 = np.array(
 
 demag_curve = CubicSpline(H_alnico_q2, J_alnico_q2)
 
-def calc_force(area, lm, lg):
-    perimeter = math.sqrt(area) * 4
+# ---------------------------------------------------------
+# OPTIMIZATION: Pre-compute Intersection Lookup Table
+# ---------------------------------------------------------
+# Instead of running root_scalar thousands of times per callback,
+# we map out the relationship between m_load and Hm once at startup.
+Hm_lookup = np.linspace(Hc, -1e-6, 10000)
+J_lookup = demag_curve(Hm_lookup)
+m_load_lookup = J_lookup / Hm_lookup
+
+# np.interp requires the x-axis (m_load) to be strictly increasing
+sort_idx = np.argsort(m_load_lookup)
+m_load_sorted = m_load_lookup[sort_idx]
+Hm_sorted = Hm_lookup[sort_idx]
+
+
+def fast_calc_force(area, lm, lg):
+    """Fully vectorized physical calculation."""
+    # Ensure inputs are treated as numpy arrays for grid operations
+    area = np.asarray(area)
+    lm = np.asarray(lm)
+    lg = np.asarray(lg)
+
+    perimeter = np.sqrt(area) * 4.0
 
     P_main = (mu0 * area) / lg
     P_edge = mu0 * 0.26 * perimeter
-    P_corner = 4 * 0.077 * mu0 * lg
+    P_corner = 4.0 * 0.077 * mu0 * lg
     Pt = P_main + P_edge + P_corner
 
-    m_load = (-2 * lm * Pt) / area
+    m_load = (-2.0 * lm * Pt) / area
 
-    def intersection_eq(Hm):
-        return (m_load * Hm) - demag_curve(Hm)
-
-    try:
-        res = root_scalar(intersection_eq, bracket=[Hc, 0], method="brentq")
-        Hm_intersect = res.root
-    except ValueError:
-        Hm_intersect = 0
+    # Instant vectorized lookup replacing root_scalar
+    Hm_intersect = np.interp(m_load, m_load_sorted, Hm_sorted)
 
     Bm_intersect = m_load * Hm_intersect
     A_roters = (Pt * lg) / mu0
     Bg = Bm_intersect * (area / A_roters)
 
-    return (A_roters * (Bg**2)) / (2 * mu0)
+    return (A_roters * (Bg**2)) / (2.0 * mu0)
 
-v_calc_force = np.vectorize(calc_force)
 
 # ==========================================
 # 2. Variable Configurations Dictionary
@@ -635,7 +651,9 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
                 return val2 * VAR_CONFIG[target]["scale"]
 
         Z = np.clip(
-            v_calc_force(map_inputs_1d("am"), map_inputs_1d("lm"), map_inputs_1d("lg")),
+            fast_calc_force(
+                map_inputs_1d("am"), map_inputs_1d("lm"), map_inputs_1d("lg")
+            ),
             0,
             FORCE_CAP,
         )
@@ -693,7 +711,9 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
                 return val1 * VAR_CONFIG[target]["scale"]
 
         Z = np.clip(
-            v_calc_force(map_inputs_2d("am"), map_inputs_2d("lm"), map_inputs_2d("lg")),
+            fast_calc_force(
+                map_inputs_2d("am"), map_inputs_2d("lm"), map_inputs_2d("lg")
+            ),
             0,
             FORCE_CAP,
         )
@@ -760,7 +780,7 @@ def update_exact_calculator(am_val, lm_val, lg_val):
     if None in (am_val, lm_val, lg_val):
         return "--- N"
     try:
-        force = calc_force(
+        force = fast_calc_force(
             am_val * VAR_CONFIG["am"]["scale"],
             lm_val * VAR_CONFIG["lm"]["scale"],
             lg_val * VAR_CONFIG["lg"]["scale"],
