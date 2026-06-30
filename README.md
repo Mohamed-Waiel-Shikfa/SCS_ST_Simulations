@@ -2,10 +2,10 @@
 
 Quick screenshot of what to expect:
 
-![](images/single_magnet_flip.png)
+![](output/single_mag_pole_switch.gif)
 
-![](images/many_magnet_flip.png)
+![](output/mag_cyl_pole_switch.gif)
 
-![](images/pivot_sim.png)
+![](output/simple_2d_pivot_sim.gif)
 
 
