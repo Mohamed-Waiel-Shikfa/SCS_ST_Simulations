@@ -926,7 +926,7 @@ def update_exact_calculator(am_val, lm_val, lg_val):
                 "scale": 1,
             },
             "displaylogo": False,
-        }1100
+        }
 
         return stats_ui, force_ui, fig, config
 
