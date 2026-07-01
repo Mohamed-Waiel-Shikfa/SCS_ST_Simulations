@@ -718,8 +718,8 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
             "toImageButtonOptions": {
                 "format": "png",
                 "filename": filename,
-                "height": 700,
-                "width": 1100,
+                "height": 2212,
+                "width": 3840,
                 "scale": 1,
             },
             "displaylogo": False,
@@ -797,8 +797,8 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
             "toImageButtonOptions": {
                 "format": "png",
                 "filename": filename,
-                "height": 700,
-                "width": 1100,
+                "height": 2212,
+                "width": 3840,
                 "scale": 1,
             },
             "displaylogo": False,
@@ -921,12 +921,12 @@ def update_exact_calculator(am_val, lm_val, lg_val):
             "toImageButtonOptions": {
                 "format": "png",
                 "filename": filename,
-                "height": 700,
-                "width": 1100,
+                "height": 2212,
+                "width": 3840,
                 "scale": 1,
             },
             "displaylogo": False,
-        }
+        }1100
 
         return stats_ui, force_ui, fig, config
 
