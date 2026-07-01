@@ -117,6 +117,26 @@ def fast_calc_force(area, lm, lg):
     return (A_roters * (Bg**2)) / (2.0 * mu0)
 
 
+def calc_exact_stats(area, lm, lg):
+    """Calculates single-point physics stats for the exact calculator."""
+    perimeter = math.sqrt(area) * 4.0
+
+    P_main = (mu0 * area) / lg
+    P_edge = mu0 * 0.26 * perimeter
+    P_corner = 4.0 * 0.077 * mu0 * lg
+    Pt = P_main + P_edge + P_corner
+
+    m_load = (-2.0 * lm * Pt) / area
+
+    Hm_intersect = np.interp(m_load, m_load_sorted, Hm_sorted)
+    Bm_intersect = m_load * Hm_intersect
+    A_roters = (Pt * lg) / mu0
+    Bg = Bm_intersect * (area / A_roters)
+    force = (A_roters * (Bg**2)) / (2.0 * mu0)
+
+    return force, Pt, Hm_intersect, Bm_intersect, A_roters, Bg, m_load
+
+
 # ==========================================
 # 2. Variable Configurations Dictionary
 # ==========================================
@@ -419,17 +439,33 @@ app.layout = html.Div(
                                     ],
                                 ),
                                 html.Div(
-                                    id="calc-output",
+                                    id="calc-stats-output",
+                                    style={
+                                        "marginTop": "20px",
+                                        "padding": "15px",
+                                        "backgroundColor": "#e9ecef",
+                                        "borderRadius": "5px",
+                                        "display": "grid",
+                                        "gridTemplateColumns": "1fr 1fr",
+                                        "gap": "10px",
+                                        "fontSize": "13px",
+                                        "color": "#495057",
+                                        "fontFamily": "monospace",
+                                    },
+                                ),
+                                html.Div(
+                                    id="calc-force-output",
                                     style={
                                         "fontSize": "22px",
                                         "fontWeight": "bold",
                                         "color": "#28a745",
                                         "textAlign": "center",
-                                        "marginTop": "20px",
-                                        "padding": "15px",
-                                        "backgroundColor": "#e9ecef",
-                                        "borderRadius": "5px",
+                                        "marginTop": "15px",
                                     },
+                                ),
+                                dcc.Graph(
+                                    id="demag-plot",
+                                    style={"height": "450px", "marginTop": "20px"},
                                 ),
                             ],
                         ),
@@ -771,23 +807,103 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
         return fig, config, btn_label
 
 
-# -- Exact Calculator Update --
+# -- Exact Calculator --
 @app.callback(
-    Output("calc-output", "children"),
+    [
+        Output("calc-stats-output", "children"),
+        Output("calc-force-output", "children"),
+        Output("demag-plot", "figure"),
+    ],
     [Input("calc-am", "value"), Input("calc-lm", "value"), Input("calc-lg", "value")],
 )
 def update_exact_calculator(am_val, lm_val, lg_val):
     if None in (am_val, lm_val, lg_val):
-        return "--- N"
+        return [], "--- N", go.Figure()
+
     try:
-        force = fast_calc_force(
+        force, Pt, Ho, Bo, Ag, Bg, m_load = calc_exact_stats(
             am_val * VAR_CONFIG["am"]["scale"],
             lm_val * VAR_CONFIG["lm"]["scale"],
             lg_val * VAR_CONFIG["lg"]["scale"],
         )
-        return f"{force:,.2f} N"
-    except Exception:
-        return "Error"
+
+        # 1. Format the stats UI
+        stats_ui = [
+            html.Div(f"Ho: {Ho:.0f} A/m"),
+            html.Div(f"Pt: {Pt:.2e} H"),
+            html.Div(f"Bo: {Bo:.4f} T"),
+            html.Div(f"Ag: {Ag * 1_000_000:.2f} mm²"),
+            html.Div(f"Bg: {Bg:.4f} T"),
+            # html.Div(f"Loadline: {m_load:.2e} T·m/A"),
+        ]
+        force_ui = f"Force: {force:,.2f} N"
+
+        # 2. Build the Plotly Demag Graph (replicating matplotlib logic)
+        fig = go.Figure()
+
+        # Demag Curve J(H)
+        fig.add_trace(
+            go.Scatter(
+                x=Hm_lookup,
+                y=J_lookup,
+                mode="lines",
+                name="Demag Curve",
+                line=dict(color="royalblue", width=2.5),
+            )
+        )
+
+        # Original Dataset Points
+        fig.add_trace(
+            go.Scatter(
+                x=H_alnico_q2,
+                y=J_alnico_q2,
+                mode="markers",
+                name="Dataset",
+                marker=dict(color="darkblue", size=7),
+            )
+        )
+
+        # Loadline
+        B_loadline = m_load * Hm_lookup
+        fig.add_trace(
+            go.Scatter(
+                x=Hm_lookup,
+                y=B_loadline,
+                mode="lines",
+                name="Loadline",
+                line=dict(color="crimson", width=2, dash="dash"),
+            )
+        )
+
+        # Operating Point
+        fig.add_trace(
+            go.Scatter(
+                x=[Ho],
+                y=[Bo],
+                mode="markers",
+                name=f"Op Point ({Ho:.0f}, {Bo:.2f})",
+                marker=dict(color="black", size=10),
+            )
+        )
+
+        # Layout styling to match matplotlib
+        fig.update_layout(
+            title=dict(text="Alnico Operating Point", font=dict(size=14)),
+            xaxis_title="H (A/m)",
+            yaxis_title="B / Polarization (T)",
+            xaxis=dict(
+                range=[-65000, 2000], showgrid=True, gridcolor="rgba(0,0,0,0.1)"
+            ),
+            yaxis=dict(range=[-0.1, 1.5], showgrid=True, gridcolor="rgba(0,0,0,0.1)"),
+            margin=dict(l=40, r=20, t=40, b=40),
+            template="plotly_white",
+            showlegend=False,
+        )
+
+        return stats_ui, force_ui, fig
+
+    except Exception as e:
+        return [html.Div(f"Error: {str(e)}")], "Error", go.Figure()
 
 
 if __name__ == "__main__":
