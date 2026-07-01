@@ -813,12 +813,13 @@ def render_analysis(x_var, y_var, val1, val2, n_clicks, var1, var2):
         Output("calc-stats-output", "children"),
         Output("calc-force-output", "children"),
         Output("demag-plot", "figure"),
-    ],
+        Output("demag-plot", "config"),
+    ],  # Added config output
     [Input("calc-am", "value"), Input("calc-lm", "value"), Input("calc-lg", "value")],
 )
 def update_exact_calculator(am_val, lm_val, lg_val):
     if None in (am_val, lm_val, lg_val):
-        return [], "--- N", go.Figure()
+        return [], "--- N", go.Figure(), {}
 
     try:
         force, Pt, Ho, Bo, Ag, Bg, m_load = calc_exact_stats(
@@ -881,12 +882,26 @@ def update_exact_calculator(am_val, lm_val, lg_val):
                 x=[Ho],
                 y=[Bo],
                 mode="markers",
-                name=f"Op Point ({Ho:.0f}, {Bo:.2f})",
+                name="Op Point",
                 marker=dict(color="black", size=10),
             )
         )
 
-        # Layout styling to match matplotlib
+        # Fixed text annotation at the bottom right of the plotting area
+        fig.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=0.95,
+            y=0.05,
+            text=f"Operating Point<br>Ho: {Ho:.0f} A/m<br>Bo: {Bo:.2f} T<br>Bg: {Bg:.2f} T",
+            showarrow=False,
+            align="left",
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="rgba(0,0,0,0.2)",
+            borderwidth=1,
+            borderpad=6,
+        )
+
         fig.update_layout(
             title=dict(text="Alnico Operating Point", font=dict(size=14)),
             xaxis_title="H (A/m)",
@@ -900,10 +915,23 @@ def update_exact_calculator(am_val, lm_val, lg_val):
             showlegend=False,
         )
 
-        return stats_ui, force_ui, fig
+        # Dynamic naming logic based on inputs and force outcome
+        filename = f"am_{am_val}_lm_{lm_val}_lg_{lg_val}_force_{int(force)}N"
+        config = {
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": filename,
+                "height": 700,
+                "width": 1100,
+                "scale": 1,
+            },
+            "displaylogo": False,
+        }
+
+        return stats_ui, force_ui, fig, config
 
     except Exception as e:
-        return [html.Div(f"Error: {str(e)}")], "Error", go.Figure()
+        return [html.Div(f"Error: {str(e)}")], "Error", go.Figure(), {}
 
 
 if __name__ == "__main__":
