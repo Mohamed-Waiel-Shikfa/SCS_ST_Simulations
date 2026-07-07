@@ -5,181 +5,137 @@ import matplotlib.pyplot as plt
 
 # --- Constants ---
 mu0 = 4 * np.pi * 1e-7
-Hc_alnico = -65000
+Hc_alnico = -60000
 
-# # =====================================================================
-# 1. DATASETS (Optimized for Single Global Splines)
 # =====================================================================
-
-# Alnico 5-7: 13-point smooth dataset
+# 1. ALNICO DATASET
+# =====================================================================
 H_alnico_q2 = np.array([
-    -59500, -59000, -57500, -56000, -54000, -52000, 
+    -60000, -59000, -57500, -56000, -54000, -52000, 
     -49000, -45000, -38000, -30000, -20000, -10000, 0
 ])
 J_alnico_q2 = np.array([
     0.0,    0.074,  0.305,  0.570,  0.800,  0.965,  
     1.100,  1.207,  1.285,  1.318,  1.338,  1.346,  1.35
 ])
-# =====================================================================
-# 2. SINGLE-SPLINE INTERPOLATION
-# =====================================================================
-# Each material utilizes exactly ONE global smooth spline function
-demag_curve = CubicSpline(H_alnico_q2, J_alnico_q2)
-# High-resolution evaluation arrays
-H_al_fine  = np.linspace(-59500, 0, 500)
-J_al_fine  = demag_curve(H_al_fine)
 
-def calculate_clamping_force(shape, lm, g_min, g_max, w=None, h=None, diameter=None):
-    """
-    Calculates clamping force using the Roters-Log-Mean Hybrid method.
-    All dimension are in mm and will be converted to m.
+# Conversion to pure Flux Density (B)
+B_alnico_q2 = J_alnico_q2 + (mu0 * H_alnico_q2)
+base_demag_curve = CubicSpline(H_alnico_q2, B_alnico_q2)
+
+def calc_Pc(length, diam):
+    """Empirical formula for the Permeance Coefficient of a cylinder in free space."""
+    return 1.0 + 2.8 * (length / diam)
+
+def calculate_clamping_force(shape, lm, g_min, g_max, diameter):
+    if shape != 'cyl':
+        raise ValueError("This function is strictly for cylindrical magnets.")
+        
+    lm /= 1000
+    g_min /= 1000
+    g_max /= 1000
+    diameter /= 1000
     
-    Parameters:
-    - shape: 'rectangular' or 'cylindrical'
-    - lm: magnet length
-    - g_min: closest gap
-    - g_max: furthest gap
-    - w, h: width and height (required if shape is 'rectangular')
-    - diameter: face diameter (required if shape is 'cylindrical')
-    """
-    
-    # --- Unit conversion ---
-    lm/=1000
-    g_min/=1000
-    g_max/=1000
-
-    # --- Geometry Calculations based on Shape ---
-    if shape == 'rec':
-        if w is None or h is None:
-            raise ValueError("Both 'w' and 'h' must be provided for a rectangular shape.")
-        print("--- Rectangular Magnet ---")
-        w/=1000
-        h/=1000
-        area = w * h
-        perimeter = 2 * w + 2 * h
-        # Roters: 2 corners at g_min, 2 corners at g_max
-        P_corner = (2 * 0.077 * mu0 * g_min) + (2 * 0.077 * mu0 * g_max)
-    elif shape == 'cyl':
-        if diameter is None:
-            raise ValueError(" 'diameter' must be provided for a cylindrical shape.")
-        print("--- Cylindrical Magnet ---")
-        diameter/=1000
-        radius = diameter / 2
-        area = np.pi * (radius ** 2)
-        perimeter = 2 * np.pi * radius
-        # Cylindrical shapes have no sharp corners
-        P_corner = 0.0   
-    else:
-        raise ValueError("Invalid shape. Choose 'rec' or 'cyl'.")
-
-    print(f"Am: {area*100**2:.4f} cm²")    
-    print(f"perimeter: {perimeter*100:.4f} cm")    
-
-    # Calculate the equivalent average physical gap distance
+    radius = diameter / 2
+    area = np.pi * (radius ** 2)
     g_avg = g_min if np.isclose(g_min, g_max) else (g_max - g_min) / np.log(g_max / g_min)
-    print(f"Lgeq: {g_avg*1000:.4f} mm")    
 
-    # --- 1. Main Gap Permeance (Log-Mean) ---
-    P_main = (mu0 * area) / g_avg
-    print(f"P_main: {P_main:.4e} H")    
+    # =================================================================
+    # PHASE 1: OPEN-CIRCUIT SELF-DEMAGNETIZATION 
+    # =================================================================
+    Pc_open = calc_Pc(lm, diameter)
+    m_open = -Pc_open * mu0
+    
+    def open_circuit_eq(Hm):
+        return (m_open * Hm) - base_demag_curve(Hm)
+        
+    res_open = root_scalar(open_circuit_eq, bracket=[Hc_alnico, 0], method='brentq')
+    H_open = res_open.root
+    B_open = m_open * H_open
+    
+    # Recoil Line (mu_rec for Alnico is ~1.9 * mu0)
+    mu_rec = 1.9 * mu0
+    def recoil_curve(Hm):
+        B_rec = B_open + mu_rec * (Hm - H_open)
+        return np.minimum(B_rec, base_demag_curve(Hm))
 
-    # --- 2. Edge Fringing Permeance (Roters' Half-Cylinders) ---
-    P_edge = mu0 * 0.26 * perimeter
-    print(f"P_edge: {P_edge:.4e} H")    
-    print(f"P_corner: {P_corner:.4e} H")    
-
-    # --- 3. Total Adjusted Circuit Permeance ---
-    Pt = P_main + P_edge + P_corner
-    print(f"Pt: {Pt:.4e} H")    
-
-    # --- 4. Magnetic Circuit Solver ---
-    # Loadline slope (Bm = m_load * Hm)
-    m_load = (-2 * lm * Pt) / area
-
+    # =================================================================
+    # PHASE 2: DYNAMIC CLAMPING SOLVER 
+    # =================================================================
+    # At g=0, they act as a cylinder of length 2*L. As g increases, they isolate.
+    Pc_clamped = calc_Pc(2 * lm, diameter)
+    Pc_g = Pc_open + (Pc_clamped - Pc_open) * np.exp(-g_avg / radius)
+    
+    m_load = -Pc_g * mu0
     def intersection_eq(Hm):
-        return (m_load * Hm) - demag_curve(Hm)
+        return (m_load * Hm) - recoil_curve(Hm)
 
-    try:
-        res = root_scalar(intersection_eq, bracket=[Hc_alnico, 0], method='brentq')
-        Hm_intersect = res.root
-    except ValueError:
-        Hm_intersect = 0
-
+    res = root_scalar(intersection_eq, bracket=[Hc_alnico, 0], method='brentq')
+    Hm_intersect = res.root
     Bm_intersect = m_load * Hm_intersect
-    print(f"Ho: {Hm_intersect:.0f} At/m")    
-    print(f"Bo: {Bm_intersect:.4f} T")    
+
+    # =================================================================
+    # PHASE 3: MAXWELL-COULOMB HYBRID FORCE MODEL
+    # =================================================================
     
+    # --- Component A: Perfect 1D Maxwell Contact Force (Controls g = 0 mm) ---
+    F_maxwell = (Bm_intersect**2 * area) / (2 * mu0)
 
-    # --- 5. Force Calculation ---
-    # Back-calculate the Roters equivalent area
-    A_roters = (Pt * g_avg) / mu0
-    print(f"Ag: {A_roters*100**2:.4f} cm²")    
-
-    # Calculate Flux Density in the gap
-    Bg = Bm_intersect * (area / A_roters)
-    print(f"Bg: {Bg:.4f} T")    
-
-    # Maxwell Stress Tensor
-    force = (A_roters * (Bg ** 2)) / (2 * mu0)
+    # --- Component B: 3D Coulomb Mesh Force (Controls g > 0.3 mm fringing) ---
+    N = 40 
+    x = np.linspace(-radius, radius, N)
+    y = np.linspace(-radius, radius, N)
+    xv, yv = np.meshgrid(x, y)
     
-    print(f"Clamping Force: {force:.4f} N")
+    mask = (xv**2 + yv**2) <= radius**2
+    x_flat = xv[mask]
+    y_flat = yv[mask]
+    
+    dx = diameter / N
+    dA = dx**2
+    q_patch = Bm_intersect * dA
+    
+    def calc_force_between_faces(z1, z2, q1_sign, q2_sign):
+        dx_matrix = x_flat[:, np.newaxis] - x_flat[np.newaxis, :]
+        dy_matrix = y_flat[:, np.newaxis] - y_flat[np.newaxis, :]
+        dz = z2 - z1
+        r_point = np.sqrt(dx_matrix**2 + dy_matrix**2 + dz**2)
+        
+        r_min_floor = np.sqrt(dA / np.pi) 
+        r_stabilized = np.maximum(r_point, r_min_floor)
+        
+        force_matrix = (q_patch**2 / (4 * np.pi * mu0)) * (q1_sign * q2_sign) * (dz / r_stabilized**3)
+        return np.sum(force_matrix)
 
-    return force, m_load, Hm_intersect, Bm_intersect
+    F_near = calc_force_between_faces(0, g_avg, 1, -1)
+    F_top = calc_force_between_faces(0, g_avg + lm, 1, 1)
+    F_bottom = calc_force_between_faces(-lm, g_avg, -1, -1)
+    F_far = calc_force_between_faces(-lm, g_avg + lm, -1, 1)
+    
+    # Mesh Output with your required shared-field "Divide by 2" logic
+    F_coulomb = abs(F_near + F_top + F_bottom + F_far) / 2.0
 
-# 1. Unpack your updated function return values
-# cylinder face to face
-force, m_load, Hm_intersect, Bm_intersect = calculate_clamping_force(
-    shape='cyl', 
-    lm=12.5, 
-    g_min=0.84, 
-    g_max=0.84, 
-    diameter=4.75
-)
+    # --- Component C: Physics Blending ---
+    # As the gap drops below the mesh grid resolution (dx), we mathematically transition 
+    # from the 3D fringing dipole to the 1D parallel Maxwell limit.
+    transition_weight = np.exp(-g_avg / (1.5 * dx))
+    
+    hybrid_force = (F_maxwell * transition_weight) + (F_coulomb * (1 - transition_weight))
 
-# cylinder angled
-# force, m_load, Hm_intersect, Bm_intersect = calculate_clamping_force(
-#     shape='cyl', 
-#     lm=12.5, 
-#     g_min=8.42, 
-#     g_max=15.14, 
-#     diameter=4.75
-# )
+    # print(f"Gap: {g_avg*1000:.2f} mm | Op Point -> B0: {Bm_intersect:.4f} T")
+    # print(f"---> HYBRID CLAMPING FORCE: {hybrid_force:.4f} N <--- \n")
+    print(hybrid_force)
 
-# square face to face
-# force, m_load, Hm_intersect, Bm_intersect = calculate_clamping_force(
-#     shape='rec', 
-#     lm=5, 
-#     g_min=2.8, 
-#     g_max=2.8, 
-#     w=10,
-#     h=20
-# )
+    return hybrid_force
 
-# 2. Compute the loadline across the global fine H array
-B_loadline = m_load * H_al_fine
+# Execute the loop across your gap data table
+gaps = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
 
-# 3. Create the single plot
-plt.figure(figsize=(8, 6))
-
-# Plot the demagnetization spline curve and data points
-plt.plot(H_al_fine, J_al_fine, color='royalblue', linewidth=2.5, label='Demag Curve $J(H)$')
-plt.scatter(H_alnico_q2, J_alnico_q2, color='darkblue', s=35, zorder=3, label='Dataset Points')
-
-# Plot the circuit loadline
-plt.plot(H_al_fine, B_loadline, color='crimson', linestyle='--', linewidth=2, label='Circuit Loadline')
-
-# Highlight the operating/intersection point
-plt.scatter(Hm_intersect, Bm_intersect, color='black', s=90, zorder=5, 
-            label=f"Operating Point\n($H_0$: {Hm_intersect:.0f} A/m, $B_0$: {Bm_intersect:.2f} T)")
-
-# Axis and labels styling
-plt.xlim(-65000, 2000)
-plt.ylim(-0.1, 1.5)
-plt.xlabel('Magnetic Field Strength H (A/m)', fontsize=12)
-plt.ylabel('Magnetic Flux Density / Polarization (T)', fontsize=12)
-plt.title('Alnico 5-7 Intrinsic Demagnetization & Operating Point', fontsize=14, pad=15)
-plt.grid(True, linestyle=':', alpha=0.6)
-plt.legend(loc='upper left', fontsize=10)
-
-plt.tight_layout()
-plt.show()
+for gap in gaps:
+    calculate_clamping_force(
+        shape='cyl', 
+        lm=12.5, 
+        g_min=gap, 
+        g_max=gap, 
+        diameter=4.75
+    )
