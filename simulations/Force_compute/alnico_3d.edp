@@ -1,0 +1,193 @@
+// ====================================================================
+// 3D Nonlinear Magnetostatics
+// Corrected Region Tags: 2 (Top Magnet), 3 (Bottom Magnet), 4 (Air)
+// ====================================================================
+load "msh3"
+load "medit"
+
+macro print(x) cout << x << endl //
+
+// 1. Rename to avoid conflict with the global keyword 'plot'
+bool enablePlot = false;
+
+// 2. Wrap the parameter in the macro definition to handle strings safely
+macro medith(title, ThMesh, solField)
+    if (enablePlot) {
+        medit(title, ThMesh, solField);
+    }
+//
+
+// --------------------------------------------------------------------
+// STEP 1: MESH LOADING & REGION DIAGNOSTICS
+// --------------------------------------------------------------------
+print("--- STEP 1: Loading & Verifying Mesh ---");
+mesh3 ThRaw = readmesh3("alnico.mesh");
+mesh3 Th = movemesh3(ThRaw, transfo=[x*1e-3, y*1e-3, z*1e-3]);
+
+fespace Vh0(Th, P0);
+Vh0 reg = region;
+
+int totalElements = Th.nt;
+print("Total mesh elements: " << totalElements);
+
+// Compute volume and element count for the ACTUAL tags (2, 3, 4)
+real vol2 = int3d(Th, 2)(1.0);
+int count2 = 0;
+for(int k=0; k<totalElements; k++) if(reg[][k] == 2) count2++;
+
+real vol3 = int3d(Th, 3)(1.0);
+int count3 = 0;
+for(int k=0; k<totalElements; k++) if(reg[][k] == 3) count3++;
+
+real vol4 = int3d(Th, 4)(1.0);
+int count4 = 0;
+for(int k=0; k<totalElements; k++) if(reg[][k] == 4) count4++;
+
+print(" -> Region 2 (Top Magnet)   : " << count2 << " elements | Volume: " << vol2 << " m^3");
+print(" -> Region 3 (Bottom Magnet): " << count3 << " elements | Volume: " << vol3 << " m^3");
+print(" -> Region 4 (Air/Boundary) : " << count4 << " elements | Volume: " << vol4 << " m^3");
+
+if (count2 + count3 + count4 == totalElements) {
+    print("SUCCESS: All elements are accounted for using tags 2, 3, and 4!");
+} else {
+    print("WARNING: There is still an element mismatch.");
+}
+
+// Visualize regions with distinct colors
+Vh0 visReg = (reg == 2) ? 1 : ((reg == 3) ? 2 : 3);
+medith("1_Mesh_Regions_Press_F2_To_Slice", Th, visReg);
+
+// --------------------------------------------------------------------
+// STEP 2: PHYSICS PARAMETERS & INITIAL CONDITIONS
+// --------------------------------------------------------------------
+print("--- STEP 2: Setting up Initial Conditions ---");
+real mu0 = 4.0 * pi * 1.0e-7;
+
+// Alnico Demagnetization Curve Data (Quadrant 2)
+real[int] Hdata = [-60000, -59000, -57500, -56000, -54000, -52000, -49000, -45000, -38000, -30000, -20000, -10000, 0];
+real[int] Jdata = [0.0,    0.074,  0.305,  0.570,  0.800,  0.965,  1.100,  1.207,  1.285,  1.318,  1.338,  1.346,  1.35];
+int nData = Hdata.n;
+real Brbase = Jdata[nData-1];
+
+fespace Vh(Th, P2);
+Vh Omega, v;
+
+// Initial linear permeabilities (Air everywhere initially)
+Vh0 mu = mu0;
+
+// Apply remanence strictly to magnet regions 2 and 3
+Vh0 BrZ = (reg == 2 || reg == 3) ? Brbase : 0.0;
+
+// Visualize the initial remanence field
+medith("2_Initial_Remanence_BrZ", Th, BrZ);
+
+// --------------------------------------------------------------------
+// STEP 3: WEAK FORMULATION
+// --------------------------------------------------------------------
+print("--- STEP 3: Defining Weak Formulation ---");
+macro grad(u) [dx(u), dy(u), dz(u)] //
+macro Hmag(u) sqrt(dx(u)^2 + dy(u)^2 + dz(u)^2 + 1e-12) //
+
+problem MagStat(Omega, v, solver=CG) =
+    int3d(Th)( mu * (grad(Omega)' * grad(v)) )
+  - int3d(Th)( BrZ * dz(v) )
+  + on(201, Omega=0);
+
+// --------------------------------------------------------------------
+// STEP 4: NONLINEAR SOLVER LOOP
+// --------------------------------------------------------------------
+print("--- STEP 4: Starting Nonlinear Picard Iterations ---");
+int maxIter = 5;
+
+for(int i=0; i<maxIter; i++) {
+    MagStat;
+
+    // Visualize scalar potential at each iteration
+    medith("3_Scalar_Potential_Iter_" + i, Th, Omega);
+
+    Vh0 currentH = Hmag(Omega);
+    mu = mu0; // Reset to air by default
+
+    for (int k = 0; k < Th.nt; k++) {
+        if (reg[][k] == 2 || reg[][k] == 3) {
+            real Hval = -abs(currentH[][k]);
+            real Bval = 0.0;
+
+            // Linear Search & Interpolation
+            if (Hval <= Hdata[0]) {
+                Bval = mu0 * Hval + Jdata[0];
+            } else if (Hval >= Hdata[nData-1]) {
+                Bval = mu0 * Hval + Jdata[nData-1];
+            } else {
+                for (int j = 0; j < nData-1; j++) {
+                    if (Hval >= Hdata[j] && Hval <= Hdata[j+1]) {
+                        real slope = (Jdata[j+1] - Jdata[j]) / (Hdata[j+1] - Hdata[j]);
+                        real Jval = Jdata[j] + slope * (Hval - Hdata[j]);
+                        Bval = mu0 * Hval + Jval;
+                        break;
+                    }
+                }
+            }
+            mu[][k] = abs(Bval / (Hval - 1e-6));
+        }
+    }
+    print("  -> Iteration " << i+1 << " completed.");
+}
+
+// --------------------------------------------------------------------
+// STEP 5: VISUALIZATION & POST-PROCESSING
+// --------------------------------------------------------------------
+print("--- STEP 5: Rendering Final Visuals ---");
+
+// Slice domain in half along Y to see inside
+mesh3 ThSlice = trunc(Th, y <= 0);
+fespace VhSlice(ThSlice, P1dc);
+
+// Calculate Final B-field Density magnitude
+VhSlice BnormSlice = sqrt((-mu*dx(Omega))^2 + (-mu*dy(Omega))^2 + (-mu*dz(Omega) + BrZ)^2);
+
+print("=====================================================");
+print("          SIMULATION COMPLETE                        ");
+print("=====================================================");
+
+// Launch final sliced 3D Viewer
+medith("4_Final_Sliced_B_Field_Density", ThSlice, BnormSlice);
+
+// --------------------------------------------------------------------
+// STEP 5: MAXWELL STRESS TENSOR (VIRTUAL WORK METHOD)
+// --------------------------------------------------------------------
+print("--- STEP 5: Calculating Attractive Force ---");
+
+// Define a P1 continuous field for our virtual displacement
+fespace Vh1(Th, P1);
+Vh1 vz;
+
+// Top magnet is at z >= 0.1 mm, Bottom is at z <= -0.1 mm.
+// vz is 1.0 in top magnet, 0.0 in bottom magnet, and scales linearly in the gap.
+vz = (z >= 0.1e-3) ? 1.0 : ( (z <= -0.1e-3) ? 0.0 : (z + 0.1e-3)/(0.2e-3) );
+
+// Calculate the final actual B-field components everywhere
+fespace Vh0B(Th, P0); 
+Vh0B Bx = -mu * dx(Omega);
+Vh0B By = -mu * dy(Omega);
+Vh0B Bz = -mu * dz(Omega) + BrZ;
+
+// Compute B^2 magnitude
+Vh0B B2 = Bx^2 + By^2 + Bz^2;
+
+// Compute the volume integral for Force (Fz) in Newtons
+real Fz = int3d(Th)(
+    (1.0 / (2.0 * mu0)) * B2 * dz(vz) 
+  - (1.0 / mu0) * Bz * (Bx * dx(vz) + By * dy(vz) + Bz * dz(vz))
+);
+
+print("=====================================================");
+print("  Attraction Force on Top Magnet: " << Fz << " Newtons");
+print("=====================================================");
+
+// Slice and render final visuals if enablePlot is true
+ThSlice = trunc(Th, y <= 0);
+fespace VhSlice2(ThSlice, P1dc);
+VhSlice2 BnormSlice2 = sqrt(Bx^2 + By^2 + Bz^2);
+
+medith("Final Sliced B Field Density", ThSlice, BnormSlice2);

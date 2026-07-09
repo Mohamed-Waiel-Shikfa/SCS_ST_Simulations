@@ -1,0 +1,148 @@
+// ====================================================================
+// 2D Axisymmetric Magnetostatics: Attraction of two Alnico Magnets
+// ====================================================================
+
+// --------------------------------------------------------------------
+// 1. PARAMETERS 
+// --------------------------------------------------------------------
+// Geometry (Dimensions in meters)
+real D    = 4.75e-3;      // Diameter of the magnets
+real L    = 12.5e-3;      // Length of the magnets
+real gap  = 0.1e-3;       // Gap between the two magnets
+real R    = D / 2.0;      // Radius of the magnets
+
+// Domain Size (Virtual air box surrounding the setup)
+real Lbox = L * 5.0;      // Height of the air box
+real Rbox = R * 10.0;     // Radius of the air box
+
+// Material Properties
+real mu0  = 4.0 * pi * 1.0e-7; // Vacuum permeability
+real murM = 3.0;               // Relative permeability of Alnico 5-7
+real murA = 1.0;               // Relative permeability of air
+real Br   = 1.3;               // Remanent magnetization of Alnico 5-7 (Tesla)
+
+// Meshing Densities
+int nBox  = 30;           // Elements on the outer air boundary
+int nMag  = 40;           // Elements along the magnet length
+int nMagR = 15;           // Elements along the magnet radius
+int nGap  = 10;           // Elements inside the thin gap
+
+// Labels for Boundary Conditions
+int axisLabel = 1;
+int outerLabel = 2;
+int magBottomLabel = 3;
+int magTopLabel = 4;
+
+// --------------------------------------------------------------------
+// 2. GEOMETRY & BORDERS
+// --------------------------------------------------------------------
+// We define the borders counter-clockwise for outer boundaries, 
+// and map them perfectly so buildmesh creates distinct regions.
+
+// Axis of symmetry (x = 0) broken into segments
+border ax5(t=Lbox, gap/2+L)   { x=0; y=t; label=axisLabel; }
+border ax4(t=gap/2+L, gap/2)  { x=0; y=t; label=axisLabel; }
+border ax3(t=gap/2, -gap/2)   { x=0; y=t; label=axisLabel; }
+border ax2(t=-gap/2, -gap/2-L){ x=0; y=t; label=axisLabel; }
+border ax1(t=-gap/2-L, -Lbox) { x=0; y=t; label=axisLabel; }
+
+// Outer Air Box Boundaries
+border outB(t=0, Rbox)        { x=t; y=-Lbox; label=outerLabel; }
+border outR(t=-Lbox, Lbox)    { x=Rbox; y=t; label=outerLabel; }
+border outT(t=Rbox, 0)        { x=t; y=Lbox; label=outerLabel; }
+
+// Top Magnet Boundaries
+border mtB(t=0, R)            { x=t; y=gap/2;   label=magTopLabel; }
+border mtR(t=gap/2, gap/2+L)  { x=R; y=t;       label=magTopLabel; }
+border mtT(t=R, 0)            { x=t; y=gap/2+L; label=magTopLabel; }
+
+// Bottom Magnet Boundaries
+border mbB(t=0, R)            { x=t; y=-gap/2-L; label=magBottomLabel; }
+border mbR(t=-gap/2-L, -gap/2){ x=R; y=t;        label=magBottomLabel; }
+border mbT(t=R, 0)            { x=t; y=-gap/2;   label=magBottomLabel; }
+
+// --------------------------------------------------------------------
+// 3. MESH GENERATION
+// --------------------------------------------------------------------
+// In FreeFEM++, we build a single "wireframe". 
+// Every border is added exactly ONCE to prevent overlapping vertex errors.
+
+mesh Th = buildmesh(
+    // 1. The Global Outer Boundary (A continuous Counter-Clockwise loop)
+    outB(nBox) + outR(nBox) + outT(nBox) + 
+    ax5(nBox) + ax4(nMag) + ax3(nGap) + ax2(nMag) + ax1(nBox)
+    
+    // 2. Internal borders separating the Top Magnet
+    + mtB(nMagR) + mtR(nMag) + mtT(nMagR)
+    
+    // 3. Internal borders separating the Bottom Magnet
+    + mbB(nMagR) + mbR(nMag) + mbT(nMagR)
+);
+
+plot(Th, wait=true, cmm="Mesh Configuration");
+
+// Automatically identify regions based on coordinate sampling
+int regAir       = Th(Rbox/2.0, 0.0).region;
+int regMagBottom = Th(R/2.0, -gap/2.0 - L/2.0).region;
+int regMagTop    = Th(R/2.0, gap/2.0 + L/2.0).region;
+
+// --------------------------------------------------------------------
+// 4. FINITE ELEMENT SPACES & MACROS
+// --------------------------------------------------------------------
+// P0 elements for constant material properties
+fespace Vh0(Th, P0);
+Vh0 mu  = (region == regMagBottom || region == regMagTop) ? (mu0 * murM) : (mu0 * murA);
+Vh0 nu  = 1.0 / mu; // Reluctivity
+// Both magnets magnetized in +z direction to attract each other
+Vh0 Brz = (region == regMagBottom || region == regMagTop) ? Br : 0.0;
+
+// P2 elements for the vector potential to ensure smooth B-field derivatives
+fespace Vh(Th, P2);
+Vh A, v; 
+
+// Macros for Axisymmetric B-field components (x is r, y is z)
+// max(x, 1e-15) prevents division by zero exactly on the axis
+macro BrF(A) (-dy(A)) //
+macro BzF(A) (A/max(x, 1e-15) + dx(A)) //
+
+// --------------------------------------------------------------------
+// 5. VARIATIONAL FORMULATION
+// --------------------------------------------------------------------
+problem magnetostatics(A, v, solver=sparsesolver) = 
+      int2d(Th)( x * nu * ( BrF(A)*BrF(v) + BzF(A)*BzF(v) ) )
+    - int2d(Th)( x * nu * Brz * BzF(v) )
+    + on(axisLabel, outerLabel, A=0);
+
+// Solve the system!
+cout << "Solving Maxwell's equations..." << endl;
+magnetostatics;
+
+// --------------------------------------------------------------------
+// 6. POST-PROCESSING & PLOTTING
+// --------------------------------------------------------------------
+Vh BfieldR = BrF(A);
+Vh BfieldZ = BzF(A);
+Vh BfieldMag = sqrt(BfieldR^2 + BfieldZ^2);
+
+// In axisymmetry, magnetic flux lines are contours of r*A
+Vh flux = A * x;
+plot(flux, nbiso=40, cmm="Magnetic Flux Lines (r*A)", wait=true);
+plot(BfieldMag, fill=true, value=true, nbiso=40, cmm="Magnetic Flux Density |B| (Tesla)", wait=true);
+
+// --------------------------------------------------------------------
+// 7. FORCE CALCULATION (Maxwell Stress Tensor)
+// --------------------------------------------------------------------
+mesh ThAir = trunc(Th, region == regAir);
+
+// Integrate the stress tensor along the air-side boundary of the top magnet.
+// We use FreeFEM++'s built-in normals (N.x and N.y) to handle the geometry.
+real FzTotal = - int1d(ThAir, mtB, mtR, mtT)(
+    2.0 * pi * x * (
+        (1.0 / mu0) * BzF(A) * BrF(A) * N.x 
+      + (1.0 / (2.0 * mu0)) * (BzF(A)^2 - BrF(A)^2) * N.y
+    )
+);
+
+cout << "=====================================================" << endl;
+cout << "  Attraction Force on Top Magnet: " << FzTotal << " N" << endl;
+cout << "=====================================================" << endl;

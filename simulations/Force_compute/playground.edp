@@ -1,0 +1,15 @@
+load "msh3"
+load "medit"
+
+// macro print(x) cout << x << endl//
+
+// string meshFileName = "simulation_mesh.mesh";
+// mesh3 Mesh = readmesh3(meshFileName);
+// plot(Mesh, wait=1);
+// medit("Mesh", Mesh);
+
+bool test = false;
+
+if (test) {
+    cout << "hello" << endl;
+}
