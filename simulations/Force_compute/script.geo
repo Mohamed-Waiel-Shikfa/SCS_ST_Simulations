@@ -4,7 +4,7 @@ SetFactory("OpenCASCADE");
 // MESH FINENESS CONTROL
 // ==========================================
 // Lower values = finer mesh (more elements). Higher values = coarser mesh.
-mesh_density = 0.0005; 
+mesh_density = 0.5; 
 //mesh_density = 1; 
 Mesh.MeshSizeFromCurvature = 32; 
 
@@ -34,5 +34,6 @@ Physical Volume("magtop", 102) = {2};
 Physical Volume("magbtm", 101) = {3};
 Physical Volume("outerboundary", 103) = {4};
 
-// 5. Select ALL surfaces so FreeFEM populates the boundary ("n Bord") entries!
-Physical Surface("mesh_skin", 201) = {Surface{:}};
+// 5. Select ONLY the true exterior skin of the entire domain!
+// This prevents short-circuiting the internal magnet-air interfaces.
+Physical Surface("mesh_skin", 201) = Boundary{ Volume{2, 3, 4}; };
