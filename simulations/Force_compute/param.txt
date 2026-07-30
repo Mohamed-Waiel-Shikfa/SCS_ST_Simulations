@@ -1,0 +1,12 @@
+Alnico:
+Grade: Alnico 5 - LNG37
+Diameter: 4.75mm
+Length: 12.5mm
+Axial magnetization
+
+NIB:
+Grade: unknown probably Grade N42
+Width: 10mm
+Height: 5mm
+Length: 20mm
+Axial magnetization
