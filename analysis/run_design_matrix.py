@@ -54,10 +54,24 @@ def existing_keys():
 
 
 def append(rows):
-    new = not CSV.exists()
+    """Append rows to the matrix CSV.
+
+    A canonical column order is used rather than the key order of whichever row
+    happens to be first in the batch.  Pre-screened designs build their result
+    dict by a different path from fully evaluated ones, so taking fieldnames
+    from ``rows[0]`` silently wrote later batches into shifted columns.
+    """
+    fields = list(rows[0].keys()) if not CSV.exists() else None
+    if CSV.exists():
+        with open(CSV, newline="") as fh:
+            fields = next(csv.reader(fh))
+    missing = [k for r in rows for k in r if k not in fields]
+    if missing:
+        raise ValueError(f"row has columns absent from the header: "
+                         f"{sorted(set(missing))}")
     with open(CSV, "a", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-        if new:
+        w = csv.DictWriter(fh, fieldnames=fields, extrasaction="raise")
+        if fh.tell() == 0:
             w.writeheader()
         w.writerows(rows)
 

@@ -160,7 +160,13 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
     for flip, tag in ((False, "attract"), (True, "repel")):
         m = AxisymModel(_regions(dsg, flip), rfar, zfar_k * dsg.l_mag, h,
                         n_slabs=n_slabs)
-        s = m.solve(**kw)
+        try:
+            s = m.solve(**kw)
+        except RuntimeError:
+            # screening turns continuation off for speed; if that stalls, pay
+            # for it on this design rather than silently dropping it, since the
+            # stiff cases are exactly the ones near the feasibility boundary
+            s = m.solve(max_iter=25, continuation=True)
         J, H = m.region_state(s, "A")
         F = axial_force(s, dsg.gap / 2, r_max=0.9 * rfar, n=nq)
         out[f"J_{tag}"] = J
@@ -222,12 +228,21 @@ def stage2_mechanics(dsg, mag):
 # --------------------------------------------------------------------------
 # Stage 3: switching
 # --------------------------------------------------------------------------
-def stage3_switching(dsg, k_switch=3.0, winding_build=None):
+def stage3_switching(dsg, k_switch=3.0, winding_build=None, v_max=200.0):
     """Can the coil reverse the magnet, and what does it cost?
 
     Peak current is taken from the underdamped LC limit, which the feasibility
     audit showed is the operative regime for a practical coil: the 0.1 mm
     winding failed because it was overdamped, not because it lacked turns.
+
+    Two different energies are reported and they must not be confused.
+    ``e_bank`` is whatever the specified capacitor happens to store, which says
+    nothing about the design - it is the same for every material at a given
+    driver.  ``e_required`` is the bank energy actually needed to reach the
+    switching threshold for THIS material and geometry, obtained by scaling the
+    drive voltage until the ampere-turns just suffice.  That is the quantity
+    that belongs in an objective, because it is what a high-coercivity grade
+    really costs.
     """
     d = dsg.wire_d
     build = winding_build or dsg.t_steel
@@ -240,22 +255,30 @@ def stage3_switching(dsg, k_switch=3.0, winding_build=None):
                                                           0.45 * mean_d)
 
     z0 = np.sqrt(L / dsg.c_cap)
-    i_peak = dsg.v_cap / z0 if R < 2 * z0 else dsg.v_cap / R   # under/over
+    underdamped = R < 2 * z0
+    i_peak = dsg.v_cap / z0 if underdamped else dsg.v_cap / R
     mmf = n_turns * i_peak
 
     hcj = MATERIALS[dsg.material]["Hcj"]
     mmf_need = k_switch * hcj * dsg.l_mag
 
+    # voltage that would just reach the threshold (peak current is linear in V
+    # in both damping regimes, so this scales directly)
+    v_need = dsg.v_cap * mmf_need / max(mmf, 1e-12)
+    e_required = 0.5 * dsg.c_cap * v_need**2
+
     v_mag = np.pi * (dsg.d_mag / 2) ** 2 * dsg.l_mag
     e_hyst = 4.0 * MATERIALS[dsg.material]["Br"] * hcj * v_mag
-    e_bank = 0.5 * dsg.c_cap * dsg.v_cap**2
 
     return dict(n_turns=n_turns, R_coil=R, L_coil=L, i_peak=i_peak,
+                underdamped=underdamped,
                 mmf=mmf, mmf_need=mmf_need,
-                switch_ok=mmf >= mmf_need,
-                switch_margin=mmf / mmf_need,
-                e_hysteresis=e_hyst, e_bank=e_bank,
-                e_total_module=e_bank * dsg.n_faces)
+                switch_ok=v_need <= v_max,
+                v_need=v_need, switch_margin=mmf / mmf_need,
+                e_hysteresis=e_hyst,
+                e_bank=0.5 * dsg.c_cap * dsg.v_cap**2,
+                e_required=e_required,
+                e_total_module=e_required * dsg.n_faces)
 
 
 # --------------------------------------------------------------------------
@@ -281,7 +304,7 @@ def score(dsg, mag=None, mech=None, sw=None):
     if mag["margin"] > MARGIN_LIMIT:
         violations.append(f"demag margin {mag['margin']:.2f} > {MARGIN_LIMIT}")
     if not sw["switch_ok"]:
-        violations.append(f"unswitchable (MMF {sw['switch_margin']:.2f} of need)")
+        violations.append(f"needs {sw['v_need']:.0f} V drive")
     if mech["hold_ratio"] < HOLD_MIN:
         violations.append(f"hold {mech['hold_ratio']:.1f} < {HOLD_MIN}")
     if mech["pivot_ratio"] < PIVOT_MIN:
@@ -334,7 +357,7 @@ def prescreen(dsg):
 
     sw = stage3_switching(dsg)
     if not sw["switch_ok"]:
-        reasons.append(f"unswitchable (MMF {sw['switch_margin']:.2f} of need)")
+        reasons.append(f"needs {sw['v_need']:.0f} V drive")
 
     mat = material(dsg.material)
     pair = CoaxialRodPair(dsg.d_mag / 2, dsg.l_mag, mat, n_slabs=12)
@@ -353,39 +376,57 @@ def prescreen(dsg):
     return (not reasons), reasons
 
 
+ROW_FIELDS = (
+    # design
+    "material", "d_mag", "l_mag", "circuit", "t_steel", "r_clear", "gap",
+    "n_faces", "a_module", "wire_d", "v_cap", "c_cap", "fidelity",
+    # stage 1
+    "J_attract", "J_repel", "margin_attract", "margin_repel",
+    "F_attract", "F_repel", "asymmetry", "margin",
+    # stage 2
+    "m_module", "hold_ratio", "pivot_ratio",
+    # stage 3
+    "mmf", "mmf_need", "v_need", "switch_margin", "e_switch",
+    # scoring
+    "feasible", "scalar", "violations",
+)
+
+
+def _row(dsg, fidelity, mag, mech, sw, feasible, scalar, violations):
+    """Build a result row in a fixed column order.
+
+    The order must not depend on which code path produced the row: a
+    pre-screened design and a fully evaluated one have to line up in the CSV.
+    """
+    src = dict(dsg.as_row())
+    src["fidelity"] = fidelity
+    src.update(mag)
+    src.update(m_module=mech.get("m_module"), hold_ratio=mech.get("hold_ratio"),
+               pivot_ratio=mech.get("pivot_ratio"))
+    src.update(mmf=sw["mmf"], mmf_need=sw["mmf_need"], v_need=sw["v_need"],
+               switch_margin=sw["switch_margin"],
+               e_switch=sw["e_total_module"])
+    src.update(feasible=feasible, scalar=scalar, violations=violations)
+    return {k: src.get(k) for k in ROW_FIELDS}
+
+
 def evaluate(dsg, fidelity="normal", use_prescreen=True):
     """Run all three stages and score.  Returns a flat dict for tabulation."""
-    row = dsg.as_row()
-    row["fidelity"] = fidelity
-
     if use_prescreen:
         ok, why = prescreen(dsg)
         if not ok:
-            row.update(dict(J_attract=np.nan, J_repel=np.nan,
-                            margin_attract=np.nan, margin_repel=np.nan,
-                            F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
-                            margin=np.nan))
-            sw = stage3_switching(dsg)
-            mech = masses(dsg)
-            row.update(dict(m_module=mech["m_module"], hold_ratio=0.0,
-                            pivot_ratio=0.0, mmf=sw["mmf"],
-                            mmf_need=sw["mmf_need"],
-                            switch_margin=sw["switch_margin"],
-                            e_switch=sw["e_total_module"]))
-            row.update(dict(feasible=False, scalar=0.0,
-                            violations="; ".join(why) + " [prescreen]"))
-            return row
+            blank = dict(J_attract=np.nan, J_repel=np.nan,
+                         margin_attract=np.nan, margin_repel=np.nan,
+                         F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
+                         margin=np.nan)
+            m = masses(dsg)
+            m.update(hold_ratio=0.0, pivot_ratio=0.0)
+            return _row(dsg, fidelity, blank, m, stage3_switching(dsg),
+                        False, 0.0, "; ".join(why) + " [prescreen]")
 
     mag = stage1_magnetics(dsg, fidelity=fidelity)
     mech = stage2_mechanics(dsg, mag)
     sw = stage3_switching(dsg)
     sc = score(dsg, mag, mech, sw)
-    row.update({k: v for k, v in mag.items()})
-    row.update(dict(m_module=mech["m_module"], hold_ratio=mech["hold_ratio"],
-                    pivot_ratio=mech["pivot_ratio"]))
-    row.update(dict(mmf=sw["mmf"], mmf_need=sw["mmf_need"],
-                    switch_margin=sw["switch_margin"],
-                    e_switch=sw["e_total_module"]))
-    row.update(dict(feasible=sc["feasible"], scalar=sc["scalar"],
-                    violations="; ".join(sc["violations"])))
-    return row
+    return _row(dsg, fidelity, mag, mech, sw, sc["feasible"], sc["scalar"],
+                "; ".join(sc["violations"]))
