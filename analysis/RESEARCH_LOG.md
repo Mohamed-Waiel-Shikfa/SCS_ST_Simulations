@@ -86,3 +86,71 @@ Worth putting in the design matrix as a material axis.
   another EPM. In a lattice of modules it will be. This needs its own study.
 * Whether an axisymmetric pot core or a planar two-rod U-core is the better
   fit for a square face.
+
+---
+
+## 2026-08-01 (later) — the repulsion problem
+
+### The asymmetry is real, and it is a material problem
+
+`analysis/check_repulsion.py` establishes two things before anything is designed
+around the attract/repel asymmetry:
+
+* with **rigid** magnetisation, |F_repel| / |F_attract| = 1.014, i.e. the two
+  states are equal and opposite as the equivalent-charge argument requires. The
+  force routine is therefore sound.
+* the mid-plane Maxwell stress integral converges by r = 5 x R_magnet, so the
+  earlier numbers were not truncated.
+
+The entire asymmetry is therefore a **magnetisation** effect: in the repel state
+the two magnets drive each other backwards along their own demagnetisation
+curves. Alnico 5 has so little coercivity that its polarisation collapses from
+0.85 T to 0.38 T, and force goes as J^2.
+
+### Grade sweep (`analysis/grade_sweep.py`)
+
+Whole supplier table, bare rods, both states. The result is a strict dominance,
+not a trade-off:
+
+| grade | Br | Hcj | attract | repel | ratio |
+|---|---|---|---|---|---|
+| LNG37 (Alnico 5) *as built* | 1.20 | 49 | +6.02 N | -0.28 N | 21.3 |
+| LNG60 (Alnico 5-7) *named in report* | 1.35 | 60 | +9.76 N | -0.45 N | 21.7 |
+| **LNGT72 (Alnico 9)** | **1.05** | **114** | **+6.60 N** | **-1.24 N** | **5.3** |
+| LNGT36J (Alnico 8HC) | 0.70 | 148 | +2.87 N | -0.80 N | 3.6 |
+
+**Alnico 9 beats Alnico 5 in BOTH states** - 4.4x the repulsion and 1.10x the
+attraction - despite 12 % lower remanence, because 2.3x the coercivity means it
+keeps far more of that remanence under load. Remanence sets the ceiling;
+coercivity decides how much of the ceiling survives a reversed neighbour.
+
+The high-remanence grades that look best on a datasheet (LNG60, the grade named
+in the report and on the poster) are the *worst* choice for a design that has to
+repel.
+
+### Combined with the circuit (`analysis/combined_fix.py`)
+
+|  | attract | repel | asymmetry |
+|---|---|---|---|
+| as built (LNG37, bare) | +5.96 N | -0.28 N | 21.3 : 1 |
+| grade change only | +6.63 N | -1.24 N | 5.4 : 1 |
+| grade + steel pot core | **+9.24 N** | **-1.44 N** | 6.4 : 1 |
+
+Net: **attraction 1.6x, repulsion 5.1x**, and the asymmetry falls from 21:1 to
+6.4:1. Incidentally the LNGT72 pot core also solves ~10x faster than the LNG37
+one, because the magnet no longer sits on the knee - the numerics get easier
+for the same reason the physics gets better.
+
+Note a residual trade: LNG37 + pot core gives the highest raw attraction
+(11.86 N) but only 0.72 N repel. Since repulsion is the binding constraint,
+LNGT72 is the right pick.
+
+### Recommendation
+
+1. Change grade to **Alnico 9 (LNGT72)**. Cheapest possible change - it is a
+   different part number, not a redesign - and it is a strict improvement.
+2. Add a **1018 steel return path**. 1 mm wall is enough; it peaks at 1.54 T,
+   well below saturation.
+3. A ~6:1 asymmetry still remains. Locomotion sequencing should not assume
+   symmetric push/pull; this needs to feed into the Stage 2 pivot model.
+
