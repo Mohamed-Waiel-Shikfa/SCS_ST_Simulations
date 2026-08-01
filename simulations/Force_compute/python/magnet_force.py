@@ -70,6 +70,34 @@ def field_kernel(beta):
     return (psi * _WEIGHT).sum(-1) / np.pi
 
 
+_PHI_INF = 4.0 / (3.0 * np.pi)
+_ASYM_FROM = 100.0
+
+
+def field_kernel_diff(u1, u2):
+    """Phi(u2) - Phi(u1), evaluated without catastrophic cancellation.
+
+    Phi saturates at 4/(3 pi), so for large arguments the direct difference of
+    two nearly equal saturated values is pure round-off.  The asymptotic
+    expansion
+
+        Phi(b) = 4/(3 pi) - 1/(4 b) + 1/(8 b^3) + O(b^-5)
+
+    (verified numerically to 1e-15 by b = 1e5) lets the difference be written in
+    a form where the leading terms cancel analytically instead of numerically.
+    """
+    u1 = np.asarray(u1, dtype=float)
+    u2 = np.asarray(u2, dtype=float)
+    out = np.atleast_1d(field_kernel(u2) - field_kernel(u1)).astype(float)
+    far = np.atleast_1d(np.minimum(u1, u2) > _ASYM_FROM)
+    if np.any(far):
+        a1 = np.atleast_1d(np.broadcast_to(u1, far.shape))[far]
+        a2 = np.atleast_1d(np.broadcast_to(u2, far.shape))[far]
+        out[far] = ((a2 - a1) / (4.0 * a1 * a2)
+                    + 1.0 / (8.0 * a2**3) - 1.0 / (8.0 * a1**3))
+    return out.reshape(np.broadcast(u1, u2).shape)
+
+
 def cylinder_demag_factor(radius, length):
     """Magnetometric (volume-averaged) demagnetising factor of a cylinder."""
     return 2.0 * radius * field_kernel(length / radius) / length
@@ -242,53 +270,75 @@ class CoaxialRodPair:
             """Average H_z in every slab from a unit (1 T) sheet at z_sheet."""
             u1 = np.abs(lo[:, None] - z_sheet[None, :]) / R
             u2 = np.abs(hi[:, None] - z_sheet[None, :]) / R
-            return (R / (MU0 * dz[:, None])) * (field_kernel(u2) - field_kernel(u1))
+            return (R / (MU0 * dz[:, None])) * field_kernel_diff(u1, u2)
 
         M = avg(z_top) - avg(z_bot)
         self._M_cache[key] = M
         return M
 
     # ---- solver ----------------------------------------------------------
-    def solve(self, gap, freeze_history=True, tol=1e-9, max_iter=80, J0=None):
-        """Solve the magnetisation integral equation J = law(M @ J).
+    def _newton(self, M, J, tol, max_iter):
+        """Damped Newton on the residual r(J) = J - law(M @ J).
 
-        A damped Newton iteration is used rather than successive substitution:
-        near the knee of a low-coercivity curve dJ/dH is of order Br/2 kA/m, so
-        the fixed-point map has a spectral radius in the hundreds and simple
-        relaxation cannot converge.
+        Successive substitution is not usable here: near the knee of a
+        low-coercivity curve dJ/dH is of order Br per 2 kA/m, so the fixed-point
+        map has a spectral radius in the hundreds.
         """
-        M = self._coupling(gap)
         law = lambda H: self.material.J_recoil(H, self.H_min)  # noqa: E731
-        if J0 is not None:
-            J = J0.copy()
-        elif self._J_last is not None:
-            J = self._J_last.copy()
-        else:
-            J = np.full(2 * self.n_slabs, self.material.J(0.0))
         eye = np.eye(2 * self.n_slabs)
         dH = max(1.0, 1e-5 * self.material.Hcj)
+        Jsat = self.material.J(0.0)
 
         r = J - law(M @ J)
+        best = (float(np.max(np.abs(r))), J.copy())
         for _ in range(max_iter):
-            if np.max(np.abs(r)) < tol:
+            rn = float(np.max(np.abs(r)))
+            if rn < tol:
                 break
             H = M @ J
             deriv = (law(H + dH) - law(H - dH)) / (2.0 * dH)
-            step = np.linalg.solve(eye - deriv[:, None] * M, -r)
-            for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.02):
-                J_try = np.clip(J + alpha * step, 0.0, self.material.J(0.0))
+            try:
+                step = np.linalg.solve(eye - deriv[:, None] * M, -r)
+            except np.linalg.LinAlgError:
+                break
+            improved = False
+            for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.02, 5e-3, 1e-3):
+                J_try = np.clip(J + alpha * step, 0.0, Jsat)
                 r_try = J_try - law(M @ J_try)
-                if np.max(np.abs(r_try)) < np.max(np.abs(r)):
+                if float(np.max(np.abs(r_try))) < rn:
+                    J, r, improved = J_try, r_try, True
                     break
-            J, r = J_try, r_try
+            if not improved:
+                break
+            if float(np.max(np.abs(r))) < best[0]:
+                best = (float(np.max(np.abs(r))), J.copy())
+        return best[1], best[0]
+
+    def solve(self, gap, freeze_history=True, tol=1e-9, max_iter=80, J0=None):
+        """Solve the magnetisation integral equation J = law(M @ J)."""
+        M = self._coupling(gap)
+        Jsat = self.material.J(0.0)
+
+        if J0 is not None:
+            start = J0.copy()
+        elif self._J_last is not None:
+            start = self._J_last.copy()
         else:
-            if np.max(np.abs(r)) > 1e-6:
-                if J0 is None and self._J_last is not None:
-                    # the warm start was a bad basin; retry from the saturated state
-                    self._J_last = None
-                    return self.solve(gap, freeze_history, tol, max_iter)
+            start = np.full(2 * self.n_slabs, Jsat)
+
+        J, res = self._newton(M, start, tol, max_iter)
+
+        if res > 1e-6:
+            # Newton stalled in a bad basin.  Walk in from the trivial problem
+            # by ramping the self-demagnetising coupling from zero to full,
+            # warm-starting each step.  The branch is monotone in lambda, so
+            # this tracks the physical solution rather than jumping basins.
+            J = np.full(2 * self.n_slabs, Jsat)
+            for lam in np.linspace(0.1, 1.0, 10):
+                J, res = self._newton(lam * M, J, tol, max_iter)
+            if res > 1e-6:
                 raise RuntimeError(f"rod solver did not converge (residual "
-                                   f"{np.max(np.abs(r)):.2e} T at gap {gap:g} m)")
+                                   f"{res:.2e} T at gap {gap:g} m)")
 
         H = M @ J
         self._J_last = J
@@ -366,6 +416,14 @@ def _self_test():
     check("G(0) = 1/2", float(force_kernel(0.0)), 0.5, 1e-9)
     check("Phi(0) = 0", float(field_kernel(0.0)), 0.0, 1e-12)
     check("Phi(inf) = 4/(3 pi)", float(field_kernel(1e6)), 4.0 / (3.0 * np.pi), 1e-6)
+    check("Phi asymptote 4/(3pi) - 1/(4b) + 1/(8b^3)",
+          float(field_kernel(30.0)),
+          4.0 / (3.0 * np.pi) - 1.0 / 120.0 + 1.0 / (8 * 27000.0), 1e-8)
+    check("stable diff matches direct at moderate u",
+          float(field_kernel_diff(20.0, 21.0)),
+          float(field_kernel(21.0)) - float(field_kernel(20.0)), 1e-14)
+    check("stable diff survives u ~ 1e11",
+          float(field_kernel_diff(1e11, 1e11 + 1.0)), 2.5e-23, 1e-25)
 
     print("magnetometric demagnetising factors")
     # Chen, Brug & Goldfarb, IEEE Trans. Magn. 27(4) 1991, magnetometric column.
