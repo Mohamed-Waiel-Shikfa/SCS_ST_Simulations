@@ -368,7 +368,14 @@ class AxisymModel:
                 best = (float(np.max(np.abs(r))), x.copy(), H, fields)
         return best[1], best[0], best[2], best[3]
 
-    def solve(self, tol=1e-7, max_iter=25):
+    def solve(self, tol=1e-7, max_iter=25, continuation=True):
+        """Solve for the magnet slab states.
+
+        ``continuation`` walks in from a weakly-coupled problem when the direct
+        Newton stalls.  It is reliable but costs several extra Newton solves, so
+        screening runs can switch it off and treat a stall as a failed design
+        rather than paying for it.
+        """
         if self.n_slab_total == 0:
             A, Br_e, Bz_e, nu = self._with_iron(np.zeros(self.mesh.t.shape[1]))
             return AxisymSolution(
@@ -384,11 +391,13 @@ class AxisymModel:
                              for k in range(self.n_slab_total)])
 
         x, res, H, fields = self._newton(saturated(), 1.0, tol, max_iter)
-        if res > 1e-5:
+        if res > 1e-5 and continuation:
             # continuation: ramp the demagnetising response from weak to full
             x = saturated()
             for lam in np.linspace(0.2, 1.0, 5):
                 x, res, H, fields = self._newton(x, lam, tol, max_iter)
+        if res > 1e-5:
+            raise RuntimeError(f"magnet solve stalled at residual {res:.1e} T")
 
         A, Br_e, Bz_e, nu = fields
         mu_rec = np.array([self.regions[self.slab_region[k]].material.mu_rec

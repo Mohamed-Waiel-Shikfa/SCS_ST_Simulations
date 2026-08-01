@@ -2,3 +2,4 @@ thesis
 alnico.mesh
 __pycache__/
 *.pyc
+analysis/*.log
