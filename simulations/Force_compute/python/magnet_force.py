@@ -232,12 +232,29 @@ class CoaxialRodPair:
     material: Material
     n_slabs: int = 24
     H_min: np.ndarray = field(default=None, repr=False)
+    orient: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.H_min is None:
             self.H_min = np.zeros(2 * self.n_slabs)
+        if self.orient is None:
+            self.orient = np.ones(2 * self.n_slabs)
         self._M_cache = {}
         self._J_last = None
+
+    def set_orientation(self, rod_a=+1, rod_b=+1):
+        """Set the magnetisation sense of each rod.
+
+        ``rod_a = rod_b = +1`` is the attracting state.  Reversing one rod gives
+        the repelling state used for pivoting.  The two rods then drive each
+        other backwards along their own demagnetisation curves, so the solve is
+        genuinely different, not just a sign flip on the force.
+        """
+        n = self.n_slabs
+        self.orient = np.concatenate([np.full(n, float(rod_a)),
+                                      np.full(n, float(rod_b))])
+        self._J_last = None
+        return self
 
     # ---- geometry helpers ------------------------------------------------
     def _edges(self, gap):
@@ -278,33 +295,40 @@ class CoaxialRodPair:
 
     # ---- solver ----------------------------------------------------------
     def _newton(self, M, J, tol, max_iter):
-        """Damped Newton on the residual r(J) = J - law(M @ J).
+        """Damped Newton on the residual r(J) = J - law(s * (M @ (s*J))).
+
+        ``J`` is the magnitude of the polarisation; the signed polarisation is
+        ``orient * J``.  Each slab's material law is driven by the field
+        component along its OWN magnetisation axis, which is why the reversed
+        state is a different solve rather than a sign flip.
 
         Successive substitution is not usable here: near the knee of a
         low-coercivity curve dJ/dH is of order Br per 2 kA/m, so the fixed-point
         map has a spectral radius in the hundreds.
         """
+        s = self.orient
         law = lambda H: self.material.J_recoil(H, self.H_min)  # noqa: E731
         eye = np.eye(2 * self.n_slabs)
         dH = max(1.0, 1e-5 * self.material.Hcj)
         Jsat = self.material.J(0.0)
+        Ms = M * s[None, :] * s[:, None]      # drives J -> H along own axis
 
-        r = J - law(M @ J)
+        r = J - law(Ms @ J)
         best = (float(np.max(np.abs(r))), J.copy())
         for _ in range(max_iter):
             rn = float(np.max(np.abs(r)))
             if rn < tol:
                 break
-            H = M @ J
+            H = Ms @ J
             deriv = (law(H + dH) - law(H - dH)) / (2.0 * dH)
             try:
-                step = np.linalg.solve(eye - deriv[:, None] * M, -r)
+                step = np.linalg.solve(eye - deriv[:, None] * Ms, -r)
             except np.linalg.LinAlgError:
                 break
             improved = False
             for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.02, 5e-3, 1e-3):
                 J_try = np.clip(J + alpha * step, 0.0, Jsat)
-                r_try = J_try - law(M @ J_try)
+                r_try = J_try - law(Ms @ J_try)
                 if float(np.max(np.abs(r_try))) < rn:
                     J, r, improved = J_try, r_try, True
                     break
@@ -315,12 +339,18 @@ class CoaxialRodPair:
         return best[1], best[0]
 
     def solve(self, gap, freeze_history=True, tol=1e-9, max_iter=80, J0=None):
-        """Solve the magnetisation integral equation J = law(M @ J)."""
+        """Solve for the polarisation magnitudes.
+
+        Returns ``(J_signed, H)`` where ``J_signed = orient * J`` is the actual
+        polarisation and ``H`` is the field along each slab's own axis.
+        """
         M = self._coupling(gap)
+        s = self.orient
+        Ms = M * s[None, :] * s[:, None]
         Jsat = self.material.J(0.0)
 
         if J0 is not None:
-            start = J0.copy()
+            start = np.abs(J0.copy())
         elif self._J_last is not None:
             start = self._J_last.copy()
         else:
@@ -330,7 +360,7 @@ class CoaxialRodPair:
 
         if res > 1e-6:
             # Newton stalled in a bad basin.  Walk in from the trivial problem
-            # by ramping the self-demagnetising coupling from zero to full,
+            # by ramping the demagnetising coupling from zero to full,
             # warm-starting each step.  The branch is monotone in lambda, so
             # this tracks the physical solution rather than jumping basins.
             J = np.full(2 * self.n_slabs, Jsat)
@@ -340,11 +370,11 @@ class CoaxialRodPair:
                 raise RuntimeError(f"rod solver did not converge (residual "
                                    f"{res:.2e} T at gap {gap:g} m)")
 
-        H = M @ J
+        H = Ms @ J
         self._J_last = J
         if not freeze_history:
             self.H_min = np.minimum(self.H_min, H)
-        return J, H
+        return s * J, H
 
     # ---- force -----------------------------------------------------------
     def _sheet_charges(self, J):
@@ -378,7 +408,11 @@ class CoaxialRodPair:
         """
         if separation is None:
             separation = 200.0 * self.length
+        saved = self.orient.copy()
+        self.orient = np.ones_like(saved)     # isolated rods: sense is moot
         self.solve(separation, freeze_history=False)
+        self.orient = saved
+        self._J_last = None
 
     def reset_history(self):
         self.H_min = np.zeros(2 * self.n_slabs)
@@ -466,6 +500,25 @@ def _self_test():
     check("Hcb", hcb, 48e3, 1e3)
     check("(BH)max", float(np.max(B * -H)), 37e3, 1e3)
     check("Br", aln.J(0.0), 1.20, 1e-6)
+
+    print("reversed magnetisation (repel state)")
+    R, L = 2.375e-3, 12.5e-3
+    rigid2 = Material("rigid", Br=0.8, Hcj=1e12, mu_rec=1.0, p=60.0, q=0.5)
+    pa = CoaxialRodPair(R, L, rigid2, n_slabs=12)
+    pr = CoaxialRodPair(R, L, rigid2, n_slabs=12).set_orientation(+1, -1)
+    fa, fr = pa.force(0.1e-3), pr.force(0.1e-3)
+    check("rigid: |F_repel| = |F_attract|", abs(fr), abs(fa), 1e-9 * abs(fa))
+    check("rigid: repel force flips sign", np.sign(fr), -np.sign(fa), 0)
+
+    aln2 = alnico_lng37()
+    pa = CoaxialRodPair(R, L, aln2, n_slabs=16)
+    pr = CoaxialRodPair(R, L, aln2, n_slabs=16).set_orientation(+1, -1)
+    Ja, _ = pa.solve(0.1e-3)
+    Jr, _ = pr.solve(0.1e-3)
+    check("Alnico: repel J below attract J",
+          float(np.mean(Ja[:16])) > float(np.mean(np.abs(Jr[:16]))), True, 0)
+    check("Alnico: repel force is repulsive",
+          np.sign(pr.force(0.1e-3)), -np.sign(pa.force(0.1e-3)), 0)
 
     print("\n" + ("ALL SELF-TESTS PASSED" if ok else "SELF-TESTS FAILED"))
     return ok
