@@ -82,16 +82,11 @@ def run(label, kw, do_dynamics=True):
     spec = make_spec(d, mag, fidelity="screen")
     ix_p = int(np.argmax(mod.normals @ np.array([1.0, 0, 0])))
     ix_m = int(np.argmin(mod.normals @ np.array([1.0, 0, 0])))
-    st_a = [0] * mod.n_faces
-    st_b = [0] * mod.n_faces
-    st_a[ix_p] = 1
-    st_b[ix_m] = -1
-    tr = run_scenario(mod, spec, st_a, st_b, seconds=0.25)
+    tr = run_scenario(mod, spec, [(ix_p, ix_m, "attract")], seconds=0.25)
     print(f"  5 DYNAMICS   latch: separation {tr[0]['sep']*1e3:+.2f} -> "
           f"{tr[-1]['sep']*1e3:+.2f} mm  "
           f"{'HELD' if tr[-1]['sep'] < 2e-3 else 'SEPARATED'}")
-    st_b[ix_m] = +1
-    tr = run_scenario(mod, spec, st_a, st_b, seconds=0.25)
+    tr = run_scenario(mod, spec, [(ix_p, ix_m, "repel")], seconds=0.25)
     print(f"               repel: moved {(tr[-1]['sep']-tr[0]['sep'])*1e3:+.1f}"
           f" mm in 0.25 s")
     return d, mag, mod, sc

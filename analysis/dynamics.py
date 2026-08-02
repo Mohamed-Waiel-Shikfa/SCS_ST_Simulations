@@ -83,14 +83,35 @@ class EPMSpec:
         tab = self.q_rep_of_gap if repel else self.q_att_of_gap
         if tab is None or self.gaps is None:
             return self.q_repel if repel else self.q_attract
+        # the charge saturates as the neighbour recedes: past the last
+        # tabulated gap the magnet is effectively open-circuit and its
+        # polarisation stops changing, so clamping IS right here.  It is the
+        # force, not the charge, that must keep decaying.
         return float(np.interp(abs(sep), self.gaps, tab))
 
     def force(self, sep, repel=False):
-        """Aligned axial force at separation ``sep``, straight from the FEM."""
+        """Aligned axial force at separation ``sep``, from the FEM table.
+
+        Beyond the tabulated range the force must be EXTRAPOLATED, not held
+        constant.  numpy's interp clamps to the end value, which turns the
+        magnet into an infinite energy source: in the pivot runs a module kept
+        being pushed at the 4 mm force after rolling 44 mm away, and sailed
+        over four gravitational barriers it had nowhere near the energy to
+        cross.  Two axially separated magnets look like two dipoles at long
+        range, so the force falls as 1/r^4; that is the tail used here, matched
+        in value at the last tabulated point.
+        """
         tab = self.f_rep_of_gap if repel else self.f_att_of_gap
         if tab is None or self.gaps is None:
             return 0.0
-        return float(np.interp(abs(sep), self.gaps, tab))
+        s = abs(sep)
+        g_end = float(self.gaps[-1])
+        if s <= g_end:
+            return float(np.interp(s, self.gaps, tab))
+        # dipole tail, measured from the magnet centres rather than the faces
+        c_end = g_end + self.length
+        c = s + self.length
+        return float(tab[-1]) * (c_end / c) ** 4
 
 
 def disc_points(radius, n_rings=2, n_per_ring=6):
@@ -233,6 +254,76 @@ def face_charges(pos, quat, mod, spec, states, q_total):
     return np.array(pts), np.array(qs)
 
 
+def _disc_pair_raw(spec, sep, q, repel, r_soft):
+    """Raw charge-model force between two coaxial pole faces at separation sep.
+
+    This is the canonical reference the pose-dependent sum is rescaled to.
+    Building it in its own frame - rather than by re-posing whole modules -
+    means it stays valid for face pairs that are not the mating pair, which is
+    exactly the situation during a pivot.
+    """
+    nsub = len(spec.sub)
+    qa = q / nsub
+    A_front = np.array([[u, v, 0.0] for (u, v) in spec.sub])
+    A_back = A_front - np.array([0.0, 0.0, spec.length])
+    B_front = A_front + np.array([0.0, 0.0, sep])
+    B_back = B_front + np.array([0.0, 0.0, spec.length])
+    sgn = +1.0 if repel else -1.0
+    pa = np.vstack([A_front, A_back])
+    ca = np.concatenate([np.full(nsub, +qa), np.full(nsub, -qa)])
+    pb = np.vstack([B_front, B_back])
+    cb = np.concatenate([np.full(nsub, sgn * qa), np.full(nsub, -sgn * qa)])
+    d = pb[None, :, :] - pa[:, None, :]
+    r = np.maximum(np.linalg.norm(d, axis=-1), r_soft)
+    coef = (ca[:, None] * cb[None, :]) / (4 * np.pi * MU0 * r**3)
+    return float((coef[:, :, None] * d).sum(axis=(0, 1))[2])
+
+
+def pair_wrench(posA, quatA, posB, quatB, mod, spec, pairs):
+    """Wrench on B from a list of (face_A, face_B, mode) interactions.
+
+    Each pair is a CENTRAL force between the two pole-face centres, with
+    magnitude taken from the Stage 1 FEM at their separation.  Being central
+    and depending only on that separation, it is the gradient of a pair
+    potential, so it conserves energy exactly.
+
+    That property is not a nicety.  The previous model multiplied a raw
+    charge-disc wrench by a separation-dependent rescaling factor, which is not
+    a gradient of anything: over a rolling cycle it pumped energy in, and
+    modules sailed over three or four gravitational barriers they had a
+    quarter of the energy to cross.  Any conclusion about whether a module can
+    pivot is worthless if the force model can manufacture the energy to do it.
+
+    Torque still arises, because the force acts at the pole face rather than at
+    the centre of mass, and it is restoring: a tilted face is pulled back into
+    line because that shortens the separation.
+    """
+    RA = np.zeros(9)
+    RB = np.zeros(9)
+    mujoco.mju_quat2Mat(RA, quatA)
+    mujoco.mju_quat2Mat(RB, quatB)
+    RA = RA.reshape(3, 3)
+    RB = RB.reshape(3, 3)
+
+    F = np.zeros(3)
+    T = np.zeros(3)
+    for ka, kb, mode in pairs:
+        repel = (mode == "repel")
+        cA = np.asarray(posA) + (RA @ mod.normals[ka]) * mod.r_face
+        cB = np.asarray(posB) + (RB @ mod.normals[kb]) * mod.r_face
+        dvec = cB - cA
+        s = float(np.linalg.norm(dvec))
+        if s < 1e-9:
+            continue
+        u = dvec / s
+        mag = spec.force(s, repel=repel)
+        f = mag * u if repel else -mag * u
+        F += f
+        T += np.cross(cB - np.asarray(posB), f)
+    return F, T
+
+
+# --------------------------------------------------------------------------
 def magnetic_wrenches(posA, quatA, stA, posB, quatB, stB, mod, spec,
                       repel=None):
     """Net force and torque on module B from module A.
@@ -255,6 +346,13 @@ def magnetic_wrenches(posA, quatA, stA, posB, quatB, stB, mod, spec,
     it is inferred from the commanded states: two faces showing the same sign
     present the same pole to each other and are therefore repelling, where the
     magnets partly demagnetise one another and carry a smaller charge.
+
+    USE THIS ONLY FOR NEARLY ALIGNED, NEARLY AXIAL SITUATIONS - latching,
+    holding, straight-line push and pull - where the rescaling is anchored to
+    the case the FEM actually computed.  For anything that rotates through a
+    large angle use ``pair_wrench``: the rescaling here is a function of pose,
+    so the resulting field is not the gradient of a potential and will pump
+    energy around a rolling cycle.
     """
     if repel is None:
         sa = next((s for s in stA if s), 0)
@@ -302,9 +400,9 @@ def _raw_wrench(posA, quatA, stA, posB, quatB, stB, mod, spec, q):
 
 # --------------------------------------------------------------------------
 SCENE = """<mujoco model="magnobots">
-  <option timestep="0.0002" gravity="0 0 -9.81" integrator="implicitfast"/>
+  <option timestep="0.00005" gravity="0 0 -9.81" integrator="implicitfast"/>
   <default>
-    <geom solref="0.002 1" solimp="0.95 0.99 0.001"/>
+    <geom solref="0.0005 1" solimp="0.98 0.999 0.0002"/>
   </default>
   <worldbody>
     <light pos="0 0 1"/>
@@ -342,9 +440,15 @@ def two_module_scene(mod, mu=0.9, gap=0.1e-3):
     return SCENE.format(bodies=bodies, mu=mu)
 
 
-def run_scenario(mod, spec, states_A, states_B, seconds=1.0, mu=0.9,
+def run_scenario(mod, spec, pairs, seconds=1.0, mu=0.9,
                  hold_A=True, record_every=50):
-    """Simulate two modules with a fixed EPM state pattern.
+    """Simulate two modules with a fixed list of active face pairs.
+
+    ``pairs`` is a list of ``(face_A, face_B, mode)`` with mode "attract" or
+    "repel", evaluated by ``pair_wrench``.  The earlier interface took whole
+    state vectors and went through ``magnetic_wrenches``, whose pose-dependent
+    rescaling divides by a reference that collapses as the gap closes: at
+    contact the sign flipped and latched modules blew apart.
 
     Returns a trace of B's pose so the caller can judge whether it held,
     separated, or rotated.
@@ -354,7 +458,6 @@ def run_scenario(mod, spec, states_A, states_B, seconds=1.0, mu=0.9,
     bA = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "A")
     bB = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "B")
     qA = model.body_jntadr[bA]
-    qB = model.body_jntadr[bB]
 
     n = int(seconds / model.opt.timestep)
     # populate xpos/xquat before the first wrench evaluation; without this the
@@ -367,7 +470,7 @@ def run_scenario(mod, spec, states_A, states_B, seconds=1.0, mu=0.9,
         rA = data.xquat[bA].copy()
         rB = data.xquat[bB].copy()
 
-        F, T = magnetic_wrenches(pA, rA, states_A, pB, rB, states_B, mod, spec)
+        F, T = pair_wrench(pA, rA, pB, rB, mod, spec, pairs)
         data.xfrc_applied[bB, :3] = F
         data.xfrc_applied[bB, 3:] = T
         data.xfrc_applied[bA, :3] = -F
@@ -387,5 +490,6 @@ def run_scenario(mod, spec, states_A, states_B, seconds=1.0, mu=0.9,
                                                  data.xpos[bA]) - 2 * mod.r_face,
                               angle=ang))
     return trace
+
 
 

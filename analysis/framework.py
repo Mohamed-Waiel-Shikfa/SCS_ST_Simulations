@@ -119,7 +119,18 @@ class Design:
 
     @property
     def bounding_cube(self):
-        return 2.0 * self.r_face / np.cos(np.pi / self.n_gon)
+        """Smallest axis-aligned cube containing the module.
+
+        The axis directions are ring normals, so the extent along each axis is
+        exactly r_face.  r_face / cos(pi/n) is the polygon CIRCUMRADIUS, which
+        governs the pivot lift, not the packaging envelope.
+        """
+        return 2.0 * self.r_face
+
+    @property
+    def r_vertex(self):
+        """Centre to pivot edge - the radius the centre of mass swings on."""
+        return self.r_face / np.cos(np.pi / self.n_gon)
 
     def as_row(self):
         return asdict(self)
@@ -218,7 +229,78 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
 # --------------------------------------------------------------------------
 # Stage 2: mechanics
 # --------------------------------------------------------------------------
-def stage2_mechanics(dsg, mag, mod=None, driver=None):
+def _pivot_geometry(n, r, theta):
+    """Gap at the mating pole faces during a roll of ``theta``.
+
+    Module B rests on the floor beside module A and tips forward over its
+    leading bottom edge.  Returns the centre-to-centre distance between B's
+    trailing pole face and A's mating pole face, which is the physical gap: it
+    is zero at theta = 0 and grows as the module rotates away.
+    """
+    a = 2.0 * r * np.tan(np.pi / n)          # square face side
+    E = np.array([a / 2, 0.0, 0.0])          # leading bottom edge, B frame
+    C = np.array([0.0, 0.0, r])              # B centre before the roll
+
+    def rot(v, t):
+        c, s = np.cos(t), np.sin(t)
+        return np.array([v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c])
+
+    m_trail = C + np.array([-r, 0.0, 0.0])
+    f_a = np.array([-r, 0.0, r])             # A's mating face centre
+    th = np.atleast_1d(theta)
+    return np.array([np.linalg.norm(E + rot(m_trail - E, t) - f_a)
+                     for t in th])
+
+
+def pivot_work(dsg, mag, n_theta=80, fidelity="screen", probe_gaps=(1e-3, 4e-3)):
+    """Work the magnets can actually put into the roll.
+
+    The static estimate this replaces multiplied peak force by arc length and
+    assumed both driving faces held that force through the whole arc.  They
+    cannot: the trailing pair separates as soon as the module tips.  MuJoCo
+    runs showed the old estimate was optimistic by roughly fifty times.
+
+    A first correction integrated force against separation using the ANALYTIC
+    charge-disc fall-off, and that was wrong the other way, by about five
+    times.  The reason is physical: as a repelling pair separates the two
+    magnets stop demagnetising each other and their polarisation RECOVERS, so
+    the repulsion decays much more slowly than a fixed-strength charge model
+    predicts.  The fall-off therefore has to come from the FEM as well as the
+    magnitude, which costs two extra Stage 1 solves.
+
+    Beyond the last probe the pair is treated as two dipoles, force ~ 1/r^4.
+
+    Only the trailing repulsion is counted.  A leading face pair could add an
+    attractive assist, but where it sits during the roll depends on lattice
+    conventions this model does not fix, so counting it would flatter the
+    design.  The number below is a lower bound on the available drive.
+    """
+    gaps = [dsg.gap] + [g for g in probe_gaps if g > dsg.gap]
+    forces = [mag["F_repel"]]
+    for g in gaps[1:]:
+        m = stage1_magnetics(Design(**{**dsg.as_row(), "gap": g}),
+                             fidelity=fidelity)
+        forces.append(m["F_repel"])
+    gaps = np.array(gaps)
+    forces = np.array(forces)
+
+    def F(s):
+        s = np.atleast_1d(np.asarray(s, dtype=float))
+        out = np.interp(s, gaps, forces)
+        tail = s > gaps[-1]
+        if np.any(tail):
+            c_end = gaps[-1] + dsg.l_mag
+            out = np.where(tail, forces[-1] * (c_end / (s + dsg.l_mag)) ** 4,
+                           out)
+        return out
+
+    th = np.linspace(0.0, 2 * np.pi / dsg.n_gon, n_theta)
+    s = _pivot_geometry(dsg.n_gon, dsg.r_face, th) + dsg.gap
+    W = float(np.trapz(F(s), s))
+    return dict(W_drive=max(W, 0.0), W_trail=W)
+
+
+def stage2_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
     """Static feasibility of latching, hanging and pivoting.
 
     Pivot model.  A module rolls onto its neighbour by rotating about the
@@ -229,13 +311,15 @@ def stage2_mechanics(dsg, mag, mod=None, driver=None):
       R_vertex = r_face / cos(pi/n) at the midpoint of the roll, so the energy
       barrier is m g (R_vertex - r_face).  This is why the polygon matters: for
       a cube the rise is 41 % of the half-width, for a 16-gon only 2 %.
-    * the magnetic drive - the trailing face repels and the leading face
-      attracts, both acting at the face radius about the pivot edge.
+    * the magnetic drive - see ``pivot_work``, which integrates force against
+      the separation each pair actually traverses.  An earlier version of this
+      function multiplied peak force by arc length and overstated the drive by
+      about fifty times.
 
     Also checks the module can hold its own weight hanging from one face, and
     that a horizontal chain of modules does not tear at the root.
     """
-    from module import build_module, pivot_angle
+    from module import build_module
 
     if mod is None:
         mod = build_module(dsg, driver)
@@ -249,19 +333,16 @@ def stage2_mechanics(dsg, mag, mod=None, driver=None):
     # energy barrier to roll over the edge
     dE = m * G * (R_vertex - r)
 
-    # magnetic work available over the roll: trailing repel + leading attract,
-    # acting through the pivot arc at the face radius
-    theta = pivot_angle(n)
-    lever = r
-    tau_drive = (mag["F_repel"] + mag["F_attract"]) * lever
-    W_drive = tau_drive * theta
+    pw = pivot_work(dsg, mag, fidelity=fidelity)
+    W_drive = pw["W_drive"]
 
     return dict(m_module=m, weight=w,
                 r_vertex=R_vertex, lift=R_vertex - r,
                 E_barrier=dE, W_drive=W_drive,
+                W_trail=pw["W_trail"],
                 pivot_ratio=W_drive / max(dE, 1e-12),
                 hold_ratio=mag["F_attract"] / w,
-                tau_drive=tau_drive,
+                tau_drive=W_drive / max(2 * np.pi / n, 1e-9),
                 fits=mod.fits, module=mod)
 
 
@@ -539,3 +620,4 @@ def evaluate(dsg, fidelity="normal", use_prescreen=True):
     sc = score(dsg, mag, mech, sw, drv)
     return _row(dsg, fidelity, mag, mech, sw, drv, sc["feasible"],
                 sc["scalar"], "; ".join(sc["violations"]))
+

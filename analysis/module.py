@@ -128,7 +128,22 @@ class Module:
 
     @property
     def bounding_cube(self):
-        return 2.0 * self.r_face / np.cos(np.pi / self.n_gon)
+        """Side of the smallest axis-aligned cube containing the module.
+
+        The solid is the intersection of the half-spaces n_k . x <= r_face, and
+        the axis directions are themselves ring normals, so the extent along
+        each axis is exactly r_face - not r_face / cos(pi/n).  That expression
+        is the CIRCUMRADIUS of the polygon cross-section, which is the right
+        quantity for the pivot lift (the centre rises to it when rolling over
+        an edge) but the wrong one for packaging.  Using it here overstated the
+        module by 8 per cent at n = 8 and more as n falls.
+        """
+        return 2.0 * self.r_face
+
+    @property
+    def r_vertex(self):
+        """Distance from the centre to a pivot edge of the cross-section."""
+        return self.r_face / np.cos(np.pi / self.n_gon)
 
     def summary(self):
         d = np.diag(self.inertia)
