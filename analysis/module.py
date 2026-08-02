@@ -1,25 +1,30 @@
-"""Stage 3: module geometry, mass properties and MuJoCo export.
+"""Module geometry: three orthogonal regular n-gon rings.
 
-Takes a design plus its selected driver and builds the actual module: an EPM
-assembly on each face of a polyhedral shell, electronics in the centre, and a
-printed shell sized to contain them.  Returns real mass and a real inertia
-tensor, which Stage 4 needs - a dynamics result is only as good as the inertia
-that went into it.
+The module is the intersection of three mutually orthogonal regular n-gon
+prisms.  For n = 8 this is the rhombicuboctahedron.  The construction requires
+n = 8 + 4k (8, 12, 16, 20, ...): four-fold symmetry so the three orthogonal
+rings close consistently, and at least 8 so the rings do not degenerate.
 
-Geometry
---------
-The module is a cube of side ``a_module`` with an EPM centred on each of six
-faces, which is the simplest arrangement that supports motion in three
-dimensions and matches the square-face constraint.  (The thesis proposes a
-rhombicuboctahedron; that adds 18 more faces without changing the physics of a
-single face-to-face interaction, so the cube is used here as the load case and
-the face count is a design variable.)
+Face count
+----------
+Each ring contributes n square faces, but the 6 faces on the coordinate axes
+are each shared by two rings, so a module has
 
-Inertia is assembled from the exact tensors of the primitives - shell walls as
-a hollow box, magnets and pole pieces as cylinders and tubes at their real
-offsets, electronics as a central block - rather than approximating the module
-as a uniform solid, because the EPMs sit at the extremities where they
-contribute most to the moment of inertia.
+    n_faces = 3n - 6          (18 for n=8, 30 for n=12, 42 for n=16)
+
+square faces, each carrying one EPM.
+
+Why the polygon matters
+-----------------------
+Locomotion is by pivoting about the shared edge with a neighbour, and the pivot
+angle is the exterior angle of the polygon,
+
+    theta = 360 / n           (45 deg for n=8, 22.5 deg for n=16)
+
+not the 90 degrees a cube would need.  A smaller pivot angle lifts the centre
+of mass less, so the torque and energy needed to roll fall sharply with n.
+That is the reason for this geometry, and it makes the face count a design
+variable rather than a styling choice.
 """
 
 from __future__ import annotations
@@ -39,200 +44,205 @@ RHO_PLA = 1240.0
 RHO_CU = 8960.0
 G = 9.81
 
-FACE_NORMALS = np.array([[+1, 0, 0], [-1, 0, 0], [0, +1, 0],
-                         [0, -1, 0], [0, 0, +1], [0, 0, -1]], dtype=float)
+
+# --------------------------------------------------------------------------
+def ring_normals(n):
+    """Face normals of the three orthogonal n-gon rings, deduplicated.
+
+    Ring 0 lies in the xy-plane, ring 1 in yz, ring 2 in zx.  Faces on the
+    coordinate axes belong to two rings and are kept once.
+    """
+    if n < 8 or (n - 8) % 4 != 0:
+        raise ValueError(f"n must be 8 + 4k (8, 12, 16, ...), got {n}")
+    out = []
+    for ring in range(3):
+        for i in range(n):
+            a = 2 * np.pi * i / n
+            c, s = np.cos(a), np.sin(a)
+            v = np.array([c, s, 0.0] if ring == 0 else
+                         [0.0, c, s] if ring == 1 else
+                         [s, 0.0, c])
+            if not any(np.allclose(v, w, atol=1e-9) for w in out):
+                out.append(v)
+    return np.array(out)
+
+
+def face_count(n):
+    return 3 * n - 6
+
+
+def pivot_angle(n):
+    """Exterior angle: rotation needed to roll onto the next face."""
+    return 2.0 * np.pi / n
 
 
 # --------------------------------------------------------------------------
-# Inertia primitives, all about the body centre of mass, then shifted
-# --------------------------------------------------------------------------
-def _cyl_inertia(m, r, h, axis):
-    """Solid cylinder, axis along 'axis' (0,1,2), about its own centre."""
+def _cyl_inertia(m, r, h, axis=2):
     ir = 0.25 * m * r**2 + m * h**2 / 12.0
-    ia = 0.5 * m * r**2
-    I = np.diag([ir, ir, ir])
-    I[axis, axis] = ia
+    I = np.eye(3) * ir
+    I[axis, axis] = 0.5 * m * r**2
     return I
 
 
-def _tube_inertia(m, r_in, r_out, h, axis):
+def _tube_inertia(m, r_in, r_out, h, axis=2):
     ir = 0.25 * m * (r_in**2 + r_out**2) + m * h**2 / 12.0
-    ia = 0.5 * m * (r_in**2 + r_out**2)
-    I = np.diag([ir, ir, ir])
-    I[axis, axis] = ia
+    I = np.eye(3) * ir
+    I[axis, axis] = 0.5 * m * (r_in**2 + r_out**2)
     return I
-
-
-def _box_inertia(m, sx, sy, sz):
-    return np.diag([m * (sy**2 + sz**2) / 12.0,
-                    m * (sx**2 + sz**2) / 12.0,
-                    m * (sx**2 + sy**2) / 12.0])
 
 
 def _shift(I, m, d):
-    """Parallel axis: move an inertia tensor by offset d."""
     d = np.asarray(d, dtype=float)
     return I + m * (np.dot(d, d) * np.eye(3) - np.outer(d, d))
 
 
-# --------------------------------------------------------------------------
+def _oriented(I_local, m, offset, axis_dir):
+    """Place an axisymmetric part with its symmetry axis along ``axis_dir``."""
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(z, axis_dir)
+    c = float(np.dot(z, axis_dir))
+    nv = np.linalg.norm(v)
+    if nv < 1e-12:
+        R = np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
+    else:
+        vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+        R = np.eye(3) + vx + vx @ vx / (1.0 + c)
+    return _shift(R @ I_local @ R.T, m, offset)
+
+
 @dataclass
 class Module:
-    a: float                 # outer side length
+    n_gon: int
+    r_face: float            # centre to pole face
+    a_face: float            # square face side
     mass: float
-    inertia: np.ndarray      # 3x3 about the centre of mass
+    inertia: np.ndarray
     parts: dict
-    n_faces: int
-    face_offset: float       # distance from centre to the EPM pole face
-    wall: float
+    normals: np.ndarray
+    fits: bool
+    free_volume: float
+
+    @property
+    def n_faces(self):
+        return len(self.normals)
+
+    @property
+    def bounding_cube(self):
+        return 2.0 * self.r_face / np.cos(np.pi / self.n_gon)
 
     def summary(self):
         d = np.diag(self.inertia)
-        return (f"side {self.a*1e3:.0f} mm, mass {self.mass*1e3:.0f} g, "
-                f"I = diag({d[0]*1e6:.0f}, {d[1]*1e6:.0f}, {d[2]*1e6:.0f}) "
-                f"g mm^2 x1e3")
+        return (f"n={self.n_gon} ({self.n_faces} faces), "
+                f"cube {self.bounding_cube*1e3:.0f} mm, "
+                f"pivot {np.degrees(pivot_angle(self.n_gon)):.1f} deg, "
+                f"{self.mass*1e3:.0f} g, I={d[0]*1e6:.0f}e-6 kg m^2")
 
 
-def build_module(dsg, driver=None, wall=2.0e-3, pcb_fill=0.55,
-                 face_recess=0.0):
-    """Assemble the module and compute its mass properties.
+def build_module(dsg, driver=None, wall=1.5e-3, pcb_fill=0.55):
+    """Assemble the module and compute mass properties.
 
-    ``driver`` is a Driver from analysis/driver.py; its mass and volume are
-    placed at the module centre.  If the electronics do not fit inside the
-    shell cavity the module is reported as not buildable, which is a real
-    constraint at small module sizes.
-
-    ``face_recess`` is how far the magnet pole face sits BEHIND the outer
-    surface of the module.  It defaults to zero - the pole must be flush - and
-    this is not a cosmetic detail: any recess adds twice over to the magnetic
-    gap between two mated modules, and at these pole diameters the force falls
-    off over a couple of millimetres.  Putting a 2 mm shell wall across the
-    pole face would cost most of the holding force.
+    Pole faces are open apertures.  Any shell material in front of a pole adds
+    to the magnetic gap twice over when two modules mate, and the recess study
+    showed 0.25 mm of wall costs more than half the holding force.
     """
-    a = dsg.a_module
-    Rm = dsg.d_mag / 2
-    Lm = dsg.l_mag
-    parts = {}
-    total_m = 0.0
-    I = np.zeros((3, 3))
+    n = dsg.n_gon
+    normals = ring_normals(n)
+    nf = len(normals)
+    r_face = dsg.r_face
+    a_face = 2.0 * r_face * np.tan(np.pi / n)
 
-    # ---- shell: hollow box, walls of thickness `wall`, with a clear aperture
-    # at each face so the pole is not shadowed by plastic
-    v_shell = a**3 - (a - 2 * wall) ** 3
-    r_ap = Rm + (dsg.r_clear + dsg.t_steel if dsg.circuit == "potcore" else 0)
-    v_shell -= min(dsg.n_faces, 6) * np.pi * r_ap**2 * wall
-    m_shell = v_shell * RHO_PLA
-    I_shell = (_box_inertia(a**3 * RHO_PLA, a, a, a) -
-               _box_inertia((a - 2 * wall) ** 3 * RHO_PLA,
-                            a - 2 * wall, a - 2 * wall, a - 2 * wall))
-    parts["shell"] = m_shell
-    total_m += m_shell
-    I += I_shell
-
-    # ---- per-face EPM assembly, pole face flush with the outer surface
+    Rm, Lm = dsg.d_mag / 2, dsg.l_mag
     has_steel = dsg.circuit == "potcore"
     r_out = Rm + dsg.r_clear + dsg.t_steel if has_steel else Rm
-    m_mag = np.pi * Rm**2 * Lm * RHO_ALNICO
-
-    # coil: annulus of copper over the magnet, packed at 60 %
     build = dsg.t_steel if has_steel else 0.5e-3
-    v_coil = np.pi * ((Rm + build) ** 2 - Rm**2) * Lm
-    m_coil = v_coil * 0.60 * RHO_CU
 
+    parts, total_m = {}, 0.0
+    I = np.zeros((3, 3))
+
+    # ---- shell: thin skin at r_face with an aperture cut for every pole
+    v_skin = max(4 * np.pi * r_face**2 * wall - nf * np.pi * r_out**2 * wall,
+                 0.0)
+    m_shell = v_skin * RHO_PLA
+    I += (2.0 / 3.0) * m_shell * r_face**2 * np.eye(3)
+    parts["shell"] = m_shell
+    total_m += m_shell
+
+    # ---- EPM assemblies, pole flush with the outer surface
+    m_mag = np.pi * Rm**2 * Lm * RHO_ALNICO
+    m_coil = np.pi * ((Rm + build) ** 2 - Rm**2) * Lm * 0.60 * RHO_CU
     if has_steel:
         m_back = np.pi * r_out**2 * dsg.t_steel * RHO_STEEL
         m_ann = np.pi * (r_out**2 - (Rm + dsg.r_clear) ** 2) * Lm * RHO_STEEL
     else:
         m_back = m_ann = 0.0
-
     m_unit = m_mag + m_coil + m_back + m_ann
-    n = min(dsg.n_faces, 6)
-    # pole face sits at the outer surface unless deliberately recessed
-    z_face = a / 2 - face_recess
-    z_mag = z_face - Lm / 2
 
-    for k in range(n):
-        nrm = FACE_NORMALS[k]
-        axis = int(np.argmax(np.abs(nrm)))
-        I_mag = _cyl_inertia(m_mag, Rm, Lm, axis)
-        I_coil = _tube_inertia(m_coil, Rm, Rm + build, Lm, axis)
-        I_unit = I_mag + I_coil
-        if has_steel:
-            I_unit = I_unit + _tube_inertia(m_ann, Rm + dsg.r_clear, r_out,
-                                            Lm, axis)
-            I_unit = I_unit + _shift(
-                _cyl_inertia(m_back, r_out, dsg.t_steel, axis), m_back,
-                nrm * (Lm / 2 + dsg.t_steel / 2))
-        I += _shift(I_unit, m_unit, nrm * z_mag)
+    I_loc = (_cyl_inertia(m_mag, Rm, Lm) +
+             _tube_inertia(m_coil, Rm, Rm + build, Lm))
+    if has_steel:
+        I_loc += _tube_inertia(m_ann, Rm + dsg.r_clear, r_out, Lm)
+        I_loc += _shift(_cyl_inertia(m_back, r_out, dsg.t_steel), m_back,
+                        [0, 0, -(Lm / 2 + dsg.t_steel / 2)])
+
+    z_mag = r_face - Lm / 2
+    for nrm in normals:
+        I += _oriented(I_loc, m_unit, nrm * z_mag, nrm)
         total_m += m_unit
 
-    parts["magnets"] = n * m_mag
-    parts["coils"] = n * m_coil
-    parts["steel"] = n * (m_back + m_ann)
+    parts["magnets"] = nf * m_mag
+    parts["coils"] = nf * m_coil
+    parts["steel"] = nf * (m_back + m_ann)
 
     # ---- electronics at the centre
     m_drv = driver.mass if driver is not None else 0.0
     v_drv = driver.volume if driver is not None else 0.0
     if m_drv:
         side = (v_drv / pcb_fill) ** (1 / 3)
-        I += _box_inertia(m_drv, side, side, side)
+        I += np.eye(3) * (m_drv * 2 * side**2 / 12.0)
         parts["driver"] = m_drv
         total_m += m_drv
 
-    # ---- fit check: does the electronics volume fit in the cavity left over?
-    cavity = (a - 2 * wall) ** 3
-    used = n * np.pi * r_out**2 * (Lm + (dsg.t_steel if has_steel else 0))
-    free = cavity - used
-    fits = free > (v_drv / pcb_fill)
+    r_in = max(r_face - Lm - (dsg.t_steel if has_steel else 0.0) - wall, 0.0)
+    # Usable internal volume is NOT the inscribed sphere below the EPMs: the
+    # EPMs are discrete cylinders on the faces, and the space between adjacent
+    # ones is perfectly usable for electronics.  Take the module volume, remove
+    # the shell skin and the EPM cylinders, and keep a packing efficiency for
+    # the fact that the remaining space is an awkward shape.
+    v_module = (4.0 / 3.0) * np.pi * r_face**3 * _shape_factor(n)
+    v_epm = nf * np.pi * r_out**2 * (Lm + (dsg.t_steel if has_steel else 0.0))
+    free = max(v_module - v_epm - v_skin, 0.0) * 0.55
+    fits = free > v_drv
 
-    return Module(a=a, mass=total_m, inertia=I, parts=parts, n_faces=n,
-                  face_offset=z_face, wall=wall), fits, free
+    return Module(n_gon=n, r_face=r_face, a_face=a_face, mass=total_m,
+                  inertia=I, parts=parts, normals=normals, fits=fits,
+                  free_volume=free)
 
 
-# --------------------------------------------------------------------------
-def module_xml(mod, forces_disabled=True):
-    """MuJoCo MJCF for a single module body, with a site on each pole face.
+def _shape_factor(n):
+    """Volume of the three-ring intersection relative to its inscribed sphere.
 
-    Magnetic interaction is applied externally as forces between the face
-    sites, because MuJoCo has no magnetics: Stage 4 reads the face separations
-    each step and applies the Stage 1 force law.
+    The solid lies between the inscribed sphere (radius r_face) and the
+    circumscribed one, so the factor is a little above 1 and approaches 1 as n
+    grows and the solid rounds off.
     """
-    a, off = mod.a, mod.face_offset
-    d = np.diag(mod.inertia)
-    sites = "\n".join(
-        f'        <site name="f{k}" pos="{off*n[0]:.5f} {off*n[1]:.5f} '
-        f'{off*n[2]:.5f}" size="0.002" rgba="0.9 0.2 0.2 1"/>'
-        for k, n in enumerate(FACE_NORMALS[:mod.n_faces]))
-    return f"""      <body name="mod" pos="0 0 0">
-        <freejoint/>
-        <inertial pos="0 0 0" mass="{mod.mass:.6f}"
-                  diaginertia="{d[0]:.9f} {d[1]:.9f} {d[2]:.9f}"/>
-        <geom type="box" size="{a/2:.5f} {a/2:.5f} {a/2:.5f}"
-              rgba="0.35 0.45 0.75 1" friction="0.9 0.02 0.001"/>
-{sites}
-      </body>"""
+    return 1.0 + 0.45 * (np.tan(np.pi / n) ** 2) * 3.0
 
 
 if __name__ == "__main__":
-    from driver import select_driver
-    from framework import Design, stage3_switching
-
-    print("=" * 84)
-    print("MODULE MASS PROPERTIES")
-    print("=" * 84)
-    print()
-    for lab, kw in (("as built (LNG37, bare)",
-                     dict(material="LNG37", circuit="none", v_cap=30.0)),
-                    ("recommended (LNGT72, potcore)",
-                     dict(material="LNGT72", circuit="potcore", v_cap=70.0))):
-        for a_mm in (40, 60, 80):
-            d = Design(a_module=a_mm * 1e-3, **kw)
-            sw = stage3_switching(d)
-            drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
-                                sw["n_turns"], sw["mmf_need"],
-                                n_faces=d.n_faces)
-            mod, fits, free = build_module(d, drv if drv.feasible else None)
-            bits = "  ".join(f"{k} {v*1e3:.0f}g" for k, v in mod.parts.items())
-            print(f"  {lab:<30} a={a_mm}mm  {mod.summary()}")
-            print(f"  {'':<30} {bits}   fits={fits}")
-        print()
+    print("=" * 74)
+    print("MODULE GEOMETRY: THREE ORTHOGONAL n-GON RINGS")
+    print("=" * 74)
+    print(f"\n  {'n':>3} {'faces':>6} {'3n-6':>6} {'pivot':>8} "
+          f"{'face side':>10} {'cube':>8}   (r_face = 20 mm)")
+    print("  " + "-" * 60)
+    for n in (8, 12, 16, 20):
+        nrm = ring_normals(n)
+        r = 20e-3
+        note = "  <- rhombicuboctahedron" if n == 8 else ""
+        print(f"  {n:3d} {len(nrm):6d} {face_count(n):6d} "
+              f"{np.degrees(pivot_angle(n)):7.1f}d "
+              f"{2*r*np.tan(np.pi/n)*1e3:9.1f}mm "
+              f"{2*r/np.cos(np.pi/n)*1e3:7.1f}mm{note}")
+        assert len(nrm) == face_count(n)
+    print("\n  face count matches 3n - 6 for every n; n=8 gives 18 squares,")
+    print("  which is the rhombicuboctahedron.")

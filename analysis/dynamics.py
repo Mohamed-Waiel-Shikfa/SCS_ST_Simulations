@@ -47,7 +47,7 @@ sys.path.insert(0, str(ROOT / "simulations" / "Force_compute" / "python"))
 
 import mujoco  # noqa: E402
 
-from module import FACE_NORMALS, build_module  # noqa: E402
+from module import build_module, ring_normals  # noqa: E402
 
 MU0 = 4.0e-7 * np.pi
 G = 9.81
@@ -207,7 +207,7 @@ def face_charges(pos, quat, mod, spec, states, q_total):
         s = states[k]
         if s == 0:
             continue
-        n_world = R @ FACE_NORMALS[k]
+        n_world = R @ mod.normals[k]
         tmp = np.array([0.0, 0.0, 1.0])
         if abs(float(np.dot(tmp, n_world))) > 0.9:
             tmp = np.array([1.0, 0.0, 0.0])
@@ -219,7 +219,7 @@ def face_charges(pos, quat, mod, spec, states, q_total):
         e1 = e1 / nrm
         e2 = np.cross(n_world, e1)
 
-        front_c = pos + n_world * mod.face_offset
+        front_c = pos + n_world * mod.r_face
         back_c = front_c - n_world * spec.length
         q = q_total * s / nsub
         for (u, v) in spec.sub:
@@ -262,14 +262,14 @@ def magnetic_wrenches(posA, quatA, stA, posB, quatB, stB, mod, spec,
         repel = (sa * sb) > 0
 
     dvec = np.asarray(posB) - np.asarray(posA)
-    sep = max(np.linalg.norm(dvec) - 2.0 * mod.face_offset, 0.0)
+    sep = max(np.linalg.norm(dvec) - 2.0 * mod.r_face, 0.0)
     q = spec.charge(sep, repel=repel)
 
     F, T = _raw_wrench(posA, quatA, stA, posB, quatB, stB, mod, spec, q)
 
     # reference: same separation, both modules aligned along the pair axis
     axis = dvec / max(np.linalg.norm(dvec), 1e-12)
-    ref_pos = np.asarray(posA) + axis * (2.0 * mod.face_offset + sep)
+    ref_pos = np.asarray(posA) + axis * (2.0 * mod.r_face + sep)
     ident = np.array([1.0, 0.0, 0.0, 0.0])
     Fr, _ = _raw_wrench(np.asarray(posA), ident, stA, ref_pos, ident, stB,
                         mod, spec, q)
@@ -317,19 +317,27 @@ SCENE = """<mujoco model="magnobots">
 
 
 def two_module_scene(mod, mu=0.9, gap=0.1e-3):
-    a = mod.a
+    """Two modules side by side, mating on their +x / -x faces.
+
+    The collision shape is a sphere of radius r_face rather than a box.  The
+    module is the intersection of three n-gon rings, so it is much closer to a
+    sphere than to a cube, and for n = 8 the inscribed and circumscribed radii
+    differ by only 8 per cent.  A sphere also rolls correctly, which a box
+    would not, and rolling is the locomotion mode being studied.
+    """
+    r = mod.r_face
     d = np.diag(mod.inertia)
     body = """    <body name="{name}" pos="{x:.5f} 0 {z:.5f}">
       <freejoint/>
       <inertial pos="0 0 0" mass="{m:.6f}" diaginertia="{i0:.9f} {i1:.9f} {i2:.9f}"/>
-      <geom type="box" size="{h:.5f} {h:.5f} {h:.5f}" rgba="{col}"
+      <geom type="sphere" size="{r:.5f}" rgba="{col}"
             friction="{mu} 0.02 0.001"/>
     </body>"""
     bodies = "\n".join([
-        body.format(name="A", x=0.0, z=a / 2, m=mod.mass, i0=d[0], i1=d[1],
-                    i2=d[2], h=a / 2, col="0.35 0.45 0.75 1", mu=mu),
-        body.format(name="B", x=a + gap, z=a / 2, m=mod.mass, i0=d[0],
-                    i1=d[1], i2=d[2], h=a / 2, col="0.80 0.45 0.30 1", mu=mu),
+        body.format(name="A", x=0.0, z=r, m=mod.mass, i0=d[0], i1=d[1],
+                    i2=d[2], r=r, col="0.35 0.45 0.75 1", mu=mu),
+        body.format(name="B", x=2 * r + gap, z=r, m=mod.mass, i0=d[0],
+                    i1=d[1], i2=d[2], r=r, col="0.80 0.45 0.30 1", mu=mu),
     ])
     return SCENE.format(bodies=bodies, mu=mu)
 
@@ -376,6 +384,8 @@ def run_scenario(mod, spec, states_A, states_B, seconds=1.0, mu=0.9,
             trace.append(dict(t=i * model.opt.timestep,
                               pos=data.xpos[bB].copy(),
                               sep=np.linalg.norm(data.xpos[bB] -
-                                                 data.xpos[bA]) - mod.a,
+                                                 data.xpos[bA]) - 2 * mod.r_face,
                               angle=ang))
     return trace
+
+

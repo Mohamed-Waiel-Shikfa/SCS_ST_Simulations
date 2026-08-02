@@ -88,7 +88,12 @@ def material(name):
 # --------------------------------------------------------------------------
 @dataclass
 class Design:
-    """One candidate EPM module."""
+    """One candidate EPM module.
+
+    Geometry is the intersection of three orthogonal regular ``n_gon`` prisms
+    (see analysis/module.py).  ``r_face`` is the centre-to-pole-face distance,
+    which with ``n_gon`` fixes every other dimension.
+    """
 
     material: str = "LNGT72"
     d_mag: float = 4.75e-3       # magnet diameter
@@ -97,11 +102,24 @@ class Design:
     t_steel: float = 1.0e-3      # keeper wall thickness
     r_clear: float = 1.0e-3      # radial clearance rod -> return annulus
     gap: float = 0.1e-3          # working air gap between mated faces
-    n_faces: int = 6             # EPMs per module
-    a_module: float = 40e-3      # module side length
+    n_gon: int = 8               # ring polygon: 8, 12, 16, 20
+    r_face: float = 20e-3        # centre to pole face
     wire_d: float = 0.3e-3       # coil wire diameter
     v_cap: float = 70.0          # capacitor bank voltage
     c_cap: float = 10e-6         # capacitor bank capacitance
+
+    @property
+    def n_faces(self):
+        return 3 * self.n_gon - 6
+
+    @property
+    def a_face(self):
+        """Square face side length."""
+        return 2.0 * self.r_face * np.tan(np.pi / self.n_gon)
+
+    @property
+    def bounding_cube(self):
+        return 2.0 * self.r_face / np.cos(np.pi / self.n_gon)
 
     def as_row(self):
         return asdict(self)
@@ -147,26 +165,43 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
     hcj = MATERIALS[dsg.material]["Hcj"]
 
     if fidelity == "screen":
-        div, ns, rfar_k, zfar_k, nq = 7.0, 4, 15, 12, 2000
-        kw = dict(max_iter=12, continuation=False)
+        ns, rfar_k, zfar_k, nq = 3, 12, 10, 1500
+        kw = dict(max_iter=10, continuation=False)
     else:
-        div, ns, rfar_k, zfar_k, nq = 14.0, 6, 25, 20, 4000
+        ns, rfar_k, zfar_k, nq = 6, 25, 20, 4000
         kw = dict(max_iter=25, continuation=True)
     n_slabs = n_slabs or ns
     rfar = rfar_k * max(ro, Rm)
-    h = mesh or max(min(dsg.d_mag, dsg.l_mag) / div, 0.15e-3)
+
+    if fidelity == "screen":
+        # Tie the mesh to the MAGNET, not to the far-field box.  The earlier
+        # rule (a fixed fraction of the outer boundary) collapsed for bare
+        # rods: with no steel the far field is small, so the rule produced
+        # h = 1.57 mm on a 4.75 mm rod - 1.5 elements across the diameter, and
+        # a 48 % force error, while pot cores with their larger outer radius
+        # got 11 %.  A structural bias like that does not cancel in a ranking:
+        # it systematically favours whichever architecture happens to be
+        # meshed better.  The mesh is graded, so resolving the magnet costs
+        # far less than resolving the whole domain.
+        h = mesh or max(min(dsg.d_mag, dsg.l_mag) / 6.0, 0.2e-3)
+    else:
+        h = mesh or max(min(dsg.d_mag, dsg.l_mag) / 16.0, 0.15e-3)
 
     out = {}
     for flip, tag in ((False, "attract"), (True, "repel")):
         m = AxisymModel(_regions(dsg, flip), rfar, zfar_k * dsg.l_mag, h,
                         n_slabs=n_slabs)
-        try:
+        if fidelity == "screen":
+            # No continuation fallback while screening.  The designs that stall
+            # are the low-coercivity ones sitting on the knee, which are also
+            # the ones that fail the demagnetisation constraint anyway, so
+            # paying for an expensive recovery to confirm a rejection is waste.
             s = m.solve(**kw)
-        except RuntimeError:
-            # screening turns continuation off for speed; if that stalls, pay
-            # for it on this design rather than silently dropping it, since the
-            # stiff cases are exactly the ones near the feasibility boundary
-            s = m.solve(max_iter=25, continuation=True)
+        else:
+            # "normal" already escalates internally (Newton -> continuation ->
+            # damped fixed point).  A second full retry on top of that just
+            # doubles the cost of a design that is going to fail anyway.
+            s = m.solve(**kw)
         J, H = m.region_state(s, "A")
         F = axial_force(s, dsg.gap / 2, r_max=0.9 * rfar, n=nq)
         out[f"J_{tag}"] = J
@@ -183,46 +218,51 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
 # --------------------------------------------------------------------------
 # Stage 2: mechanics
 # --------------------------------------------------------------------------
-def masses(dsg):
-    """Magnet, steel, shell and total module mass."""
-    Rm = dsg.d_mag / 2
-    v_mag = np.pi * Rm**2 * dsg.l_mag
-    if dsg.circuit == "potcore":
-        ro = Rm + dsg.r_clear + dsg.t_steel
-        v_steel = (np.pi * ro**2 * dsg.t_steel +
-                   np.pi * (ro**2 - (Rm + dsg.r_clear)**2) * dsg.l_mag)
-    else:
-        v_steel = 0.0
-    a = dsg.a_module
-    v_shell = a**3 - (a * 0.9) ** 3
-    m_unit = v_mag * RHO_ALNICO + v_steel * RHO_STEEL
-    return dict(m_magnet=v_mag * RHO_ALNICO, m_steel=v_steel * RHO_STEEL,
-                m_shell=v_shell * RHO_SHELL,
-                m_module=dsg.n_faces * m_unit + v_shell * RHO_SHELL)
-
-
-def stage2_mechanics(dsg, mag):
+def stage2_mechanics(dsg, mag, mod=None, driver=None):
     """Static feasibility of latching, hanging and pivoting.
 
-    Pivot model: a module tips about the shared edge of its mating face.  The
-    driving torque comes from one face repelling and the opposite face
-    attracting, both acting at roughly half the module width from the pivot
-    edge; gravity resists through the centre of mass at the same lever arm.
-    This is a static go/no-go, not a trajectory - Stage 2 proper (MuJoCo) will
-    replace it once a geometry is chosen.
+    Pivot model.  A module rolls onto its neighbour by rotating about the
+    shared edge through the exterior angle 360/n.  Two quantities decide
+    whether that is possible:
+
+    * the gravity barrier - the centre of mass rises from r_face to
+      R_vertex = r_face / cos(pi/n) at the midpoint of the roll, so the energy
+      barrier is m g (R_vertex - r_face).  This is why the polygon matters: for
+      a cube the rise is 41 % of the half-width, for a 16-gon only 2 %.
+    * the magnetic drive - the trailing face repels and the leading face
+      attracts, both acting at the face radius about the pivot edge.
+
+    Also checks the module can hold its own weight hanging from one face, and
+    that a horizontal chain of modules does not tear at the root.
     """
-    m = masses(dsg)
-    w = m["m_module"] * G
-    lever = dsg.a_module / 2
+    from module import build_module, pivot_angle
 
+    if mod is None:
+        mod = build_module(dsg, driver)
+
+    m = mod.mass
+    w = m * G
+    n = dsg.n_gon
+    r = dsg.r_face
+    R_vertex = r / np.cos(np.pi / n)
+
+    # energy barrier to roll over the edge
+    dE = m * G * (R_vertex - r)
+
+    # magnetic work available over the roll: trailing repel + leading attract,
+    # acting through the pivot arc at the face radius
+    theta = pivot_angle(n)
+    lever = r
     tau_drive = (mag["F_repel"] + mag["F_attract"]) * lever
-    tau_gravity = w * lever
+    W_drive = tau_drive * theta
 
-    return dict(**m,
-                weight=w,
-                hold_ratio=mag["F_attract"] / w,            # can it hang?
-                pivot_ratio=tau_drive / tau_gravity,        # can it tip?
-                tau_drive=tau_drive, tau_gravity=tau_gravity)
+    return dict(m_module=m, weight=w,
+                r_vertex=R_vertex, lift=R_vertex - r,
+                E_barrier=dE, W_drive=W_drive,
+                pivot_ratio=W_drive / max(dE, 1e-12),
+                hold_ratio=mag["F_attract"] / w,
+                tau_drive=tau_drive,
+                fits=mod.fits, module=mod)
 
 
 # --------------------------------------------------------------------------
@@ -256,7 +296,10 @@ def stage3_switching(dsg, k_switch=3.0, winding_build=None, v_max=200.0):
 
     z0 = np.sqrt(L / dsg.c_cap)
     underdamped = R < 2 * z0
-    i_peak = dsg.v_cap / z0 if underdamped else dsg.v_cap / R
+    # resistance always bounds the peak current, even for a very low
+    # inductance coil where the LC impedance alone would predict a huge one
+    i_peak = min(dsg.v_cap / z0 if z0 > 0 else np.inf,
+                 dsg.v_cap / max(R, 1e-6))
     mmf = n_turns * i_peak
 
     hcj = MATERIALS[dsg.material]["Hcj"]
@@ -286,40 +329,52 @@ def stage3_switching(dsg, k_switch=3.0, winding_build=None, v_max=200.0):
 # --------------------------------------------------------------------------
 MARGIN_LIMIT = 0.80          # H/Hcj above this erases the magnet in service
 HOLD_MIN = 3.0               # attraction must exceed 3x module weight
-PIVOT_MIN = 1.2              # drive torque must exceed gravity by 20 %
+PIVOT_MIN = 1.5              # magnetic work must exceed the gravity barrier
+CUBE_MAX = 50e-3             # the module must fit inside a 5 cm cube
 
 
-def score(dsg, mag=None, mech=None, sw=None):
+def score(dsg, mag=None, mech=None, sw=None, drv=None):
     """Objectives and constraints for one design.
 
     Objectives are returned separately rather than collapsed into one number,
-    so a multi-objective search (NSGA-II) can use them directly.  A scalar
-    fallback is provided for single-objective methods.
+    so a multi-objective search can use them directly.  A scalar fallback is
+    provided for single-objective methods.
     """
-    mag = mag or stage1_magnetics(dsg)
-    mech = mech or stage2_mechanics(dsg, mag)
-    sw = sw or stage3_switching(dsg)
+    mag = mag if mag is not None else stage1_magnetics(dsg)
+    sw = sw if sw is not None else stage3_switching(dsg)
+    if drv is None:
+        from driver import select_driver
+        drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
+                            sw["n_turns"], sw["mmf_need"],
+                            n_faces=dsg.n_faces)
+    mech = mech if mech is not None else stage2_mechanics(
+        dsg, mag, driver=drv if drv.feasible else None)
 
     violations = []
     if mag["margin"] > MARGIN_LIMIT:
         violations.append(f"demag margin {mag['margin']:.2f} > {MARGIN_LIMIT}")
-    if not sw["switch_ok"]:
-        violations.append(f"needs {sw['v_need']:.0f} V drive")
+    if not drv.feasible:
+        violations.append(f"no driver for {sw['v_need']:.0f} V")
     if mech["hold_ratio"] < HOLD_MIN:
         violations.append(f"hold {mech['hold_ratio']:.1f} < {HOLD_MIN}")
     if mech["pivot_ratio"] < PIVOT_MIN:
         violations.append(f"pivot {mech['pivot_ratio']:.2f} < {PIVOT_MIN}")
+    if dsg.bounding_cube > CUBE_MAX:
+        violations.append(f"cube {dsg.bounding_cube*1e3:.0f} mm > 50 mm")
+    if not mech["fits"]:
+        violations.append("electronics do not fit")
+    if dsg.l_mag + (dsg.t_steel if dsg.circuit == "potcore" else 0) > \
+            0.85 * dsg.r_face:
+        violations.append("EPM deeper than the module radius")
 
     objectives = dict(
         f_attract=mag["F_attract"],            # maximise
         f_repel=mag["F_repel"],                # maximise
         asymmetry=mag["asymmetry"],            # minimise
-        e_switch=sw["e_total_module"],         # minimise
+        e_switch=sw["e_required"] * dsg.n_faces,   # minimise
         mass=mech["m_module"],                 # minimise
     )
 
-    # scalar fallback: geometric mean of the "more is better" terms divided by
-    # the "less is better" terms, so no single term can dominate by scale
     feasible = not violations
     scalar = 0.0 if not feasible else (
         (objectives["f_repel"] ** 0.5 * objectives["f_attract"] ** 0.5) /
@@ -329,46 +384,65 @@ def score(dsg, mag=None, mech=None, sw=None):
 
     return dict(objectives=objectives, violations=violations,
                 feasible=feasible, scalar=scalar,
-                magnetics=mag, mechanics=mech, switching=sw)
+                magnetics=mag, mechanics=mech, switching=sw, driver=drv)
 
 
 # --------------------------------------------------------------------------
 # Cheap pre-screen
 # --------------------------------------------------------------------------
-def prescreen(dsg):
+def prescreen(dsg, sw=None, drv=None):
     """Reject hopeless designs in milliseconds, before paying for the FEM.
 
-    Two of the constraints do not need FEM accuracy to evaluate:
+    Several constraints need no field solve:
 
-    * switching feasibility is a circuit calculation and involves no field
-      solve at all;
-    * the demagnetisation margin of an isolated rod is available in closed form
-      from the validated free-space solver, and a design whose rod already
-      exceeds the limit with no neighbour present can only get worse once a
+    * pure geometry - the EPM must fit inside the module radius, and the module
+      must fit inside the 5 cm cube;
+    * driver feasibility - a circuit calculation;
+    * the open-circuit demagnetisation margin of an isolated rod, available in
+      closed form from the validated free-space solver.  A rod that already
+      exceeds the limit with no neighbour present can only be worse once a
       neighbour reverses against it.
 
     This matters for cost as well as time: the low-coercivity designs are both
     the physically hopeless ones AND the numerically stiff ones, so screening
-    them out analytically removes most of the expensive FEM work.
-
-    Returns (ok, reasons).
+    them analytically removes most of the expensive FEM work.
     """
     reasons = []
 
-    sw = stage3_switching(dsg)
-    if not sw["switch_ok"]:
-        reasons.append(f"needs {sw['v_need']:.0f} V drive")
+    depth = dsg.l_mag + (dsg.t_steel if dsg.circuit == "potcore" else 0.0)
+    if depth > 0.85 * dsg.r_face:
+        reasons.append("EPM deeper than the module radius")
+    r_out = dsg.d_mag / 2 + (dsg.r_clear + dsg.t_steel
+                             if dsg.circuit == "potcore" else 0.0)
+    if 2 * r_out > 0.95 * dsg.a_face:
+        reasons.append("EPM wider than the face")
+    if dsg.bounding_cube > CUBE_MAX:
+        reasons.append(f"cube {dsg.bounding_cube*1e3:.0f} mm > 50 mm")
+
+    if sw is None:
+        sw = stage3_switching(dsg)
+    if drv is None:
+        from driver import select_driver
+        drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
+                            sw["n_turns"], sw["mmf_need"],
+                            n_faces=dsg.n_faces)
+    if not drv.feasible:
+        reasons.append(f"no driver for {sw['v_need']:.0f} V")
+
+    if reasons:
+        return False, reasons
 
     mat = material(dsg.material)
     pair = CoaxialRodPair(dsg.d_mag / 2, dsg.l_mag, mat, n_slabs=12)
     try:
-        _, H = pair.solve(1e3 * dsg.l_mag)      # isolated rod
-        margin_open = float(np.mean(np.abs(H[:12]))) / MATERIALS[dsg.material]["Hcj"]
+        _, H = pair.solve(1e3 * dsg.l_mag)
+        margin_open = (float(np.mean(np.abs(H[:12]))) /
+                       MATERIALS[dsg.material]["Hcj"])
     except RuntimeError:
         return False, ["free-space solve failed"]
 
-    # a closed circuit can only improve on the open-circuit margin, so this is
-    # a valid lower bound only for the uncircuited case
+    # a closed circuit can only improve on the open-circuit margin, so this
+    # bound is valid only for the uncircuited case
     if dsg.circuit == "none" and margin_open > MARGIN_LIMIT:
         reasons.append(f"open-circuit demag margin {margin_open:.2f} "
                        f"> {MARGIN_LIMIT}")
@@ -379,54 +453,89 @@ def prescreen(dsg):
 ROW_FIELDS = (
     # design
     "material", "d_mag", "l_mag", "circuit", "t_steel", "r_clear", "gap",
-    "n_faces", "a_module", "wire_d", "v_cap", "c_cap", "fidelity",
+    "n_gon", "r_face", "wire_d", "v_cap", "c_cap", "fidelity",
+    # derived geometry
+    "n_faces", "a_face", "bounding_cube",
     # stage 1
     "J_attract", "J_repel", "margin_attract", "margin_repel",
     "F_attract", "F_repel", "asymmetry", "margin",
     # stage 2
-    "m_module", "hold_ratio", "pivot_ratio",
+    "m_module", "hold_ratio", "pivot_ratio", "E_barrier", "W_drive",
     # stage 3
-    "mmf", "mmf_need", "v_need", "switch_margin", "e_switch",
+    "mmf", "mmf_need", "v_need", "e_switch",
+    # driver
+    "drv_mass", "drv_price", "drv_cap", "drv_mosfet",
     # scoring
     "feasible", "scalar", "violations",
 )
 
 
-def _row(dsg, fidelity, mag, mech, sw, feasible, scalar, violations):
+def _row(dsg, fidelity, mag, mech, sw, drv, feasible, scalar, violations):
     """Build a result row in a fixed column order.
 
     The order must not depend on which code path produced the row: a
     pre-screened design and a fully evaluated one have to line up in the CSV.
     """
     src = dict(dsg.as_row())
-    src["fidelity"] = fidelity
+    src.update(fidelity=fidelity, n_faces=dsg.n_faces, a_face=dsg.a_face,
+               bounding_cube=dsg.bounding_cube)
     src.update(mag)
-    src.update(m_module=mech.get("m_module"), hold_ratio=mech.get("hold_ratio"),
-               pivot_ratio=mech.get("pivot_ratio"))
+    src.update(m_module=mech.get("m_module"),
+               hold_ratio=mech.get("hold_ratio"),
+               pivot_ratio=mech.get("pivot_ratio"),
+               E_barrier=mech.get("E_barrier"), W_drive=mech.get("W_drive"))
     src.update(mmf=sw["mmf"], mmf_need=sw["mmf_need"], v_need=sw["v_need"],
-               switch_margin=sw["switch_margin"],
-               e_switch=sw["e_total_module"])
+               e_switch=sw["e_required"] * dsg.n_faces)
+    src.update(drv_mass=(drv.mass if drv and drv.feasible else None),
+               drv_price=(drv.price if drv and drv.feasible else None),
+               drv_cap=(drv.cap_name if drv and drv.feasible else None),
+               drv_mosfet=(drv.mosfet_name if drv and drv.feasible else None))
     src.update(feasible=feasible, scalar=scalar, violations=violations)
     return {k: src.get(k) for k in ROW_FIELDS}
 
 
 def evaluate(dsg, fidelity="normal", use_prescreen=True):
-    """Run all three stages and score.  Returns a flat dict for tabulation."""
+    """Run every stage and score.  Returns a flat dict for tabulation."""
+    from driver import select_driver
+    from module import build_module
+
+    sw = stage3_switching(dsg)
+    drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
+                        sw["n_turns"], sw["mmf_need"], n_faces=dsg.n_faces)
+
     if use_prescreen:
-        ok, why = prescreen(dsg)
+        ok, why = prescreen(dsg, sw, drv)
         if not ok:
             blank = dict(J_attract=np.nan, J_repel=np.nan,
                          margin_attract=np.nan, margin_repel=np.nan,
                          F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
                          margin=np.nan)
-            m = masses(dsg)
-            m.update(hold_ratio=0.0, pivot_ratio=0.0)
-            return _row(dsg, fidelity, blank, m, stage3_switching(dsg),
-                        False, 0.0, "; ".join(why) + " [prescreen]")
+            mod = build_module(dsg, drv if drv.feasible else None)
+            mech = dict(m_module=mod.mass, hold_ratio=0.0, pivot_ratio=0.0,
+                        E_barrier=np.nan, W_drive=0.0, fits=mod.fits)
+            return _row(dsg, fidelity, blank, mech, sw, drv, False, 0.0,
+                        "; ".join(why) + " [prescreen]")
 
-    mag = stage1_magnetics(dsg, fidelity=fidelity)
-    mech = stage2_mechanics(dsg, mag)
-    sw = stage3_switching(dsg)
-    sc = score(dsg, mag, mech, sw)
-    return _row(dsg, fidelity, mag, mech, sw, sc["feasible"], sc["scalar"],
-                "; ".join(sc["violations"]))
+    try:
+        mag = stage1_magnetics(dsg, fidelity=fidelity)
+    except RuntimeError as exc:
+        # A stalled nonlinear solve is a property of the DESIGN, not a bug:
+        # it happens when the magnet sits exactly on the knee of its own
+        # demagnetisation curve, which is precisely the operating point the
+        # margin constraint exists to forbid.  Record it as infeasible rather
+        # than letting it abort the sweep.
+        blank = dict(J_attract=np.nan, J_repel=np.nan,
+                     margin_attract=np.nan, margin_repel=np.nan,
+                     F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
+                     margin=1.0)
+        mod = build_module(dsg, drv if drv.feasible else None)
+        mech = dict(m_module=mod.mass, hold_ratio=0.0, pivot_ratio=0.0,
+                    E_barrier=np.nan, W_drive=0.0, fits=mod.fits)
+        return _row(dsg, fidelity, blank, mech, sw, drv, False, 0.0,
+                    f"magnet solve stalled on the knee ({exc})")
+
+    mod = build_module(dsg, drv if drv.feasible else None)
+    mech = stage2_mechanics(dsg, mag, mod=mod)
+    sc = score(dsg, mag, mech, sw, drv)
+    return _row(dsg, fidelity, mag, mech, sw, drv, sc["feasible"],
+                sc["scalar"], "; ".join(sc["violations"]))
