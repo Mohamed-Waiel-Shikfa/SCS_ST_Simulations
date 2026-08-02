@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from compat import trapezoid
 from scipy.sparse.linalg import splu
 from skfem import (Basis, BilinearForm, ElementTriP1, LinearForm, MeshTri,
                    asm, condense, solve)
@@ -713,6 +714,7 @@ def axial_force(sol, z_plane, r_max, n=4000):
     """
     r = np.linspace(1e-9, r_max, n)
     Br, Bz = sample_B(sol, r, np.full_like(r, z_plane))
-    trapz = getattr(np, "trapezoid", None) or np.trapz
-    return float(trapz((Bz**2 - Br**2) / (2 * MU0) * 2 * np.pi * r, r))
+    return float(trapezoid((Bz**2 - Br**2) / (2 * MU0) * 2 * np.pi * r, r))
+
+
 

@@ -20,19 +20,31 @@ infeasible, by reducing violation, before it can start optimising.
 
 Cost control
 ------------
-Every evaluation runs a nonlinear FEM twice, so the pre-screen matters: it
-rejects geometrically or electrically impossible designs in milliseconds, and
-those are also the numerically stiff ones.  Results are cached by genome so
-repeated individuals cost nothing, and the whole run is appended to the design
-matrix.
+Every evaluation runs a nonlinear FEM two to four times, so three things carry
+the run: the pre-screen rejects impossible designs in milliseconds, results are
+cached by genome so repeated individuals cost nothing, and evaluations within a
+generation are spread across processes.  ``evaluate`` is a pure function of a
+Design, so the parallelism is embarrassing - there is no shared state to guard.
+
+Checkpointing
+-------------
+The population, the evaluation cache and the RNG state are written to disk
+after every generation.  A run that is interrupted - a wall-clock limit on a
+cloud runner, a laptop going to sleep - resumes from the last generation
+instead of starting again, and the cache means even the interrupted generation
+is not re-evaluated.  Because the RNG state is restored too, a resumed run
+produces exactly the same sequence as an uninterrupted one.
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import math
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -135,6 +147,76 @@ def to_design(g):
 def genome_key(g):
     return json.dumps({k: (round(v, 9) if isinstance(v, float) else v)
                        for k, v in sorted(g.items())})
+
+
+# --------------------------------------------------------------------------
+# Parallel evaluation.  This has to be a module-level function so it can be
+# pickled to a worker; Windows spawns fresh interpreters rather than forking.
+def _eval_worker(args):
+    g, fidelity = args
+    try:
+        row = evaluate(to_design(g), fidelity=fidelity)
+    except Exception as exc:                       # noqa: BLE001
+        row = to_design(g).as_row()
+        row.update(feasible=False, violations=f"eval failed: {exc}",
+                   scalar=0.0, F_attract=0.0, F_repel=0.0,
+                   asymmetry=float("inf"), e_switch=float("inf"),
+                   m_module=float("inf"), n_faces=0)
+    return genome_key(g), row
+
+
+# --------------------------------------------------------------------------
+# Checkpointing.  NaN and infinity are not valid JSON, and json.dump writes
+# them as bare NaN/Infinity which many parsers reject, so they are encoded
+# explicitly and restored on load.
+def _enc(x):
+    if isinstance(x, float):
+        if math.isnan(x):
+            return "__nan__"
+        if math.isinf(x):
+            return "__inf__" if x > 0 else "__-inf__"
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return _enc(float(x))
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+    return x
+
+
+def _dec(x):
+    if x == "__nan__":
+        return float("nan")
+    if x == "__inf__":
+        return float("inf")
+    if x == "__-inf__":
+        return float("-inf")
+    return x
+
+
+def save_checkpoint(path, gen, pop, cache, rng, history, cfg):
+    tmp = Path(str(path) + ".tmp")
+    blob = dict(
+        version=1, gen=gen, cfg=cfg, history=history,
+        rng_state=rng.bit_generator.state,
+        pop=[{k: _enc(v) for k, v in g.items()} for g in pop],
+        cache=[[k, {kk: _enc(vv) for kk, vv in r.items()}]
+               for k, r in cache.items()],
+    )
+    with open(tmp, "w") as fh:
+        json.dump(blob, fh)
+    tmp.replace(path)          # atomic: a killed process cannot leave a
+                               # half-written checkpoint behind
+
+
+def load_checkpoint(path):
+    with open(path) as fh:
+        blob = json.load(fh)
+    pop = [{k: _dec(v) for k, v in g.items()} for g in blob["pop"]]
+    cache = {k: {kk: _dec(vv) for kk, vv in r.items()}
+             for k, r in blob["cache"]}
+    return blob["gen"], pop, cache, blob["rng_state"], blob["history"], \
+        blob.get("cfg", {})
 
 
 # --------------------------------------------------------------------------
@@ -309,98 +391,140 @@ class GAResult:
 
 
 def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
-           csv_path=None, verbose=True):
+           csv_path=None, verbose=True, workers=None, checkpoint=None,
+           resume=False):
+    cfg = dict(pop_size=pop_size, generations=generations, seed=seed,
+               fidelity=fidelity)
     rng = np.random.default_rng(seed)
     cache = {}
-    n_eval = 0
-
-    def ev(g):
-        nonlocal n_eval
-        k = genome_key(g)
-        if k not in cache:
-            try:
-                cache[k] = evaluate(to_design(g), fidelity=fidelity)
-            except Exception as exc:
-                bad = to_design(g).as_row()
-                bad.update(feasible=False, violations=f"eval failed: {exc}",
-                           scalar=0.0, f_attract=0.0, f_repel=0.0,
-                           asymmetry=np.inf, e_switch=np.inf,
-                           m_module=np.inf, n_faces=0)
-                cache[k] = bad
-            n_eval += 1
-        return cache[k]
-
-    pop = [random_genome(rng) for _ in range(pop_size)]
     history = []
+    gen0 = 0
+
+    if resume and checkpoint and Path(checkpoint).exists():
+        gen0, pop, cache, rng_state, history, old_cfg = \
+            load_checkpoint(checkpoint)
+        for k in ("pop_size", "seed", "fidelity"):
+            if old_cfg.get(k) != cfg[k]:
+                raise SystemExit(
+                    f"checkpoint was written with {k}={old_cfg.get(k)!r}, "
+                    f"this run asks for {cfg[k]!r}.  Resuming would silently "
+                    f"mix two different experiments; start a new run instead.")
+        rng.bit_generator.state = rng_state
+        # Resume AT the checkpointed generation, not after it.  The checkpoint
+        # is written once that generation's population has been evaluated but
+        # before selection consumes any randomness, so restarting at gen0
+        # replays selection from exactly the state it would have had.  The
+        # re-evaluation is free: every one of those genomes is in the cache.
+        if verbose:
+            print(f"  resumed from {checkpoint}: restarting generation "
+                  f"{gen0}, {len(cache)} cached evaluations", flush=True)
+    else:
+        pop = [random_genome(rng) for _ in range(pop_size)]
+
+    if workers is None:
+        workers = max(1, min(os.cpu_count() or 1, pop_size * 2))
+    pool = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+    n_eval = [len(cache)]
     t0 = time.time()
 
-    for gen in range(generations + 1):
-        rows = [ev(g) for g in pop]
-        F = [objective_vector(r) for r in rows]
-        V = [violation(r) for r in rows]
-        fronts = fast_nondominated_sort(F, V)
-
-        feas = [r for r in rows if r["feasible"]]
-        best = max(feas, key=lambda r: r["scalar"]) if feas else None
-        history.append(dict(gen=gen, n_feasible=len(feas), n_eval=n_eval,
-                            best=best["scalar"] if best else 0.0))
-        if verbose:
-            msg = (f"  gen {gen:3d}  feasible {len(feas):3d}/{len(rows):3d}  "
-                   f"front {len(fronts[0]):3d}  evals {n_eval:4d}  "
-                   f"{time.time()-t0:5.0f}s")
-            if best:
-                msg += (f"   best: {best['material']:<8} n={best['n_gon']:2d} "
-                        f"Fa={best['f_attract'] if 'f_attract' in best else best['F_attract']:5.2f} "
-                        f"Fr={best['F_repel']:4.2f} "
-                        f"asym={best['asymmetry']:4.1f} "
-                        f"m={best['m_module']*1e3:4.0f}g")
-            print(msg, flush=True)
-
-        if gen == generations:
-            break
-
-        # ---- tournament selection on (rank, crowding)
-        rank = np.zeros(len(pop), dtype=int)
-        crowd = np.zeros(len(pop))
-        for r_i, fr in enumerate(fronts):
-            d = crowding(F, fr)
-            for pos, i in enumerate(fr):
-                rank[i] = r_i
-                crowd[i] = d[pos]
-
-        def pick():
-            a, b = rng.integers(len(pop)), rng.integers(len(pop))
-            if rank[a] != rank[b]:
-                return pop[a if rank[a] < rank[b] else b]
-            return pop[a if crowd[a] > crowd[b] else b]
-
-        children = []
-        while len(children) < pop_size:
-            c1, c2 = sbx(pick(), pick(), rng)
-            children.append(mutate(c1, rng))
-            if len(children) < pop_size:
-                children.append(mutate(c2, rng))
-
-        # ---- elitist survival from parents + children
-        allg = pop + children
-        allr = [ev(g) for g in allg]
-        AF = [objective_vector(r) for r in allr]
-        AV = [violation(r) for r in allr]
-        afronts = fast_nondominated_sort(AF, AV)
-
-        newpop = []
-        for fr in afronts:
-            if len(newpop) + len(fr) <= pop_size:
-                newpop.extend(allg[i] for i in fr)
+    def ev_many(genomes):
+        """Evaluate a list of genomes, using the cache and the process pool."""
+        todo, seen = [], set()
+        for g in genomes:
+            k = genome_key(g)
+            if k not in cache and k not in seen:
+                seen.add(k)
+                todo.append(g)
+        if todo:
+            if pool is None:
+                out = [_eval_worker((g, fidelity)) for g in todo]
             else:
-                d = crowding(AF, fr)
-                order = np.argsort(-d)
-                for o in order[: pop_size - len(newpop)]:
-                    newpop.append(allg[fr[o]])
-                break
-        pop = newpop
+                out = list(pool.map(_eval_worker,
+                                    [(g, fidelity) for g in todo],
+                                    chunksize=1))
+            for k, row in out:
+                cache[k] = row
+            n_eval[0] += len(todo)
+        return [cache[genome_key(g)] for g in genomes]
 
-    rows = [ev(g) for g in pop]
+    try:
+        for gen in range(gen0, generations + 1):
+            rows = ev_many(pop)
+            F = [objective_vector(r) for r in rows]
+            V = [violation(r) for r in rows]
+            fronts = fast_nondominated_sort(F, V)
+
+            feas = [r for r in rows if r["feasible"]]
+            best = max(feas, key=lambda r: r["scalar"]) if feas else None
+            history.append(dict(gen=gen, n_feasible=len(feas),
+                                n_eval=n_eval[0],
+                                best=best["scalar"] if best else 0.0))
+            if verbose:
+                msg = (f"  gen {gen:3d}  feasible {len(feas):3d}/{len(rows):3d}"
+                       f"  front {len(fronts[0]):3d}  evals {n_eval[0]:5d}  "
+                       f"{time.time()-t0:5.0f}s")
+                if best:
+                    msg += (f"   best: {best['material']:<8} "
+                            f"n={best['n_gon']:2d} "
+                            f"Fa={best['F_attract']:5.2f} "
+                            f"Fr={best['F_repel']:4.2f} "
+                            f"asym={best['asymmetry']:4.1f} "
+                            f"piv={best['pivot_ratio']:4.1f} "
+                            f"m={best['m_module']*1e3:4.0f}g")
+                print(msg, flush=True)
+
+            if checkpoint:
+                save_checkpoint(checkpoint, gen, pop, cache, rng, history, cfg)
+
+            if gen == generations:
+                break
+
+            # ---- tournament selection on (rank, crowding)
+            rank = np.zeros(len(pop), dtype=int)
+            crowd = np.zeros(len(pop))
+            for r_i, fr in enumerate(fronts):
+                d = crowding(F, fr)
+                for pos, i in enumerate(fr):
+                    rank[i] = r_i
+                    crowd[i] = d[pos]
+
+            def pick():
+                a, b = rng.integers(len(pop)), rng.integers(len(pop))
+                if rank[a] != rank[b]:
+                    return pop[a if rank[a] < rank[b] else b]
+                return pop[a if crowd[a] > crowd[b] else b]
+
+            children = []
+            while len(children) < pop_size:
+                c1, c2 = sbx(pick(), pick(), rng)
+                children.append(mutate(c1, rng))
+                if len(children) < pop_size:
+                    children.append(mutate(c2, rng))
+
+            # ---- elitist survival from parents + children
+            allg = pop + children
+            allr = ev_many(allg)
+            AF = [objective_vector(r) for r in allr]
+            AV = [violation(r) for r in allr]
+            afronts = fast_nondominated_sort(AF, AV)
+
+            newpop = []
+            for fr in afronts:
+                if len(newpop) + len(fr) <= pop_size:
+                    newpop.extend(allg[i] for i in fr)
+                else:
+                    d = crowding(AF, fr)
+                    order = np.argsort(-d)
+                    for o in order[: pop_size - len(newpop)]:
+                        newpop.append(allg[fr[o]])
+                    break
+            pop = newpop
+
+        rows = ev_many(pop)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+
     F = [objective_vector(r) for r in rows]
     V = [violation(r) for r in rows]
     fronts = fast_nondominated_sort(F, V)
@@ -455,19 +579,39 @@ def report(res, top=12):
 
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="NSGA-II over the Magnobots design pipeline")
     ap.add_argument("--pop", type=int, default=32)
     ap.add_argument("--gens", type=int, default=12)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--fidelity", default="screen")
     ap.add_argument("--csv", default=str(HERE / "design_matrix.csv"))
+    ap.add_argument("--workers", type=int, default=None,
+                    help="parallel evaluation processes "
+                         "(default: one per core, capped at 2x population)")
+    ap.add_argument("--checkpoint", default=str(HERE / "ga_state.json"),
+                    help="checkpoint file written after every generation")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from the checkpoint instead of starting "
+                         "a new run")
+    ap.add_argument("--no-checkpoint", action="store_true")
     a = ap.parse_args()
+
+    from compat import check_environment
+    check_environment()
+
+    ckpt = None if a.no_checkpoint else a.checkpoint
+    workers = a.workers or max(1, min(os.cpu_count() or 1, a.pop * 2))
 
     print("=" * 100)
     print(f"NSGA-II  pop={a.pop}  generations={a.gens}  seed={a.seed}  "
-          f"fidelity={a.fidelity}")
+          f"fidelity={a.fidelity}  workers={workers}")
     print(f"objectives: " + ", ".join(
         f"{'max' if s > 0 else 'min'} {k}" for k, s in OBJECTIVES.items()))
+    if ckpt:
+        print(f"checkpoint: {ckpt}"
+              + ("  (resuming)" if a.resume else ""))
     print("=" * 100)
-    res = run_ga(a.pop, a.gens, a.seed, a.fidelity, a.csv)
+    res = run_ga(a.pop, a.gens, a.seed, a.fidelity, a.csv,
+                 workers=workers, checkpoint=ckpt, resume=a.resume)
     report(res)

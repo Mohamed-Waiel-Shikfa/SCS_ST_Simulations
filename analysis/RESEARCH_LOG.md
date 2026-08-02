@@ -154,3 +154,117 @@ LNGT72 is the right pick.
 3. A ~6:1 asymmetry still remains. Locomotion sequencing should not assume
    symmetric push/pull; this needs to feed into the Stage 2 pivot model.
 
+
+---
+
+## 2026-08-02 - Module geometry, confirmed with the author
+
+The module is the **intersection of three mutually orthogonal regular n-gon
+prisms**, not a cube.
+
+* cross-section is a regular n-gon with **n = 8 + 4k** (8, 12, 16, 20 ...);
+  four-fold symmetry is needed so the three orthogonal rings close consistently
+* **3n - 6 square faces** (18 / 30 / 42 / 54), one EPM on each
+* **pivot angle = 360/n**, not 90 degrees.  This is the whole point of the
+  geometry: a smaller step lifts the centre of mass less
+* fits inside a **5 cm cube**; homogeneous, polygamous, lattice, solid state
+* latch by attraction, locomote by repulsion
+
+Consequence for the design space: `n_gon` and `r_face` replace any cube side
+length, and n is a real design variable, not a styling choice.
+
+A packaging error followed from getting this wrong the other way: the bounding
+cube was computed as `2 r_face / cos(pi/n)`.  That expression is the polygon
+CIRCUMRADIUS, which is the right quantity for the pivot lift but the wrong one
+for the envelope - the axis directions are themselves ring normals, so the box
+is exactly `2 r_face`.  The module was being reported 8 % larger than it is.
+
+---
+
+## 2026-08-02 - The solver was the bottleneck, and it was the wrong shape
+
+The nonlinear magnet solve took 668 s for a single pot-core design at full
+fidelity, and stalled outright on short rods.  Both problems had the same root
+cause: the two nonlinearities were being solved together.
+
+* the field is **linear** in the slab remanences for a frozen reluctivity, so
+  the entire magnet coupling is an n-by-n permeance matrix M, obtained with n
+  back-substitutions on one factorisation.  The material law then reduces to
+  `x = t(Mx)` on n unknowns with an analytic Jacobian - no field solves at all.
+* the iron is nonlinear in |B|, so M drifts.  That is an outer loop.
+
+Solving them in that order is 100x faster (3-70 s), and the stalls disappear
+because the Jacobian is no longer a finite difference taken across the knee of
+the demagnetisation curve.
+
+Two real bugs fell out:
+
+1. **the iron loop returned stale fields.**  It updated the reluctivity and
+   then returned the fields computed with the PREVIOUS one, so the permeance
+   matrix and the fields described slightly different problems.  Hard floor of
+   2e-3 T on the outer residual; deeply saturated pot cores looked
+   unconvergeable.  One extra linear solve at the end fixes it.
+2. **the screening mesh was tied to the far-field box, not the magnet.**  For a
+   bare rod that gave 1.5 elements across the diameter and a 48 % force error,
+   while pot cores - which have a larger outer radius - got 11 %.  A structural
+   bias like that does not cancel in a ranking; it silently favours whichever
+   architecture happens to be meshed better.
+
+`screening_study.py` now measures this rather than assuming it: over 24 designs
+spanning both architectures, screening at `h = min(D,L)/6` has a median error of
+4.2 % and a **Spearman rank correlation of 0.992** against full fidelity, at
+about 1/8 of the cost.  That is what makes the optimiser's use of a cheap
+surrogate defensible.
+
+---
+
+## 2026-08-02 - The pivot does not work, and three models were hiding it
+
+The pivot was the only claim in the pipeline that had never been simulated.
+Running it in MuJoCo on the real polyhedron broke three separate models, every
+one of which had been flattering the design.
+
+**1. The static pivot criterion was optimistic by ~50x.**  It multiplied peak
+force by arc length, assuming both driving faces held full force through the
+whole 45 degree roll.  They cannot: the trailing pair separates as soon as the
+module tips, and force falls off with gap far faster than arc length grows.
+
+**2. A first correction was wrong the other way, by ~5x**, because it used the
+analytic charge-disc fall-off.  As a repelling pair separates the two magnets
+stop demagnetising each other and their polarisation **recovers**, so repulsion
+decays much more slowly than a fixed-strength model predicts.  The fall-off has
+to come from the FEM too.  With that, predicted work is within 25 % of the work
+the simulation actually delivers, measured by integrating F.v over the run.
+
+**3. `EPMSpec.force` clamped beyond its table**, because that is what numpy's
+`interp` does.  A module 44 mm away was still being pushed at the 4 mm force -
+an infinite energy source.  Modules sailed over four gravitational barriers
+they had a quarter of the energy to cross.  Now a 1/r^4 dipole tail.
+
+**4. The wrench model was not conservative.**  It rescaled a charge-disc sum by
+a pose-dependent factor, which is not the gradient of anything, so it pumped
+energy around a rolling cycle; and at contact its reference collapsed and the
+sign flipped, blowing latched modules apart.  Rotating configurations now use a
+central force between pole-face centres with the FEM magnitude, conservative by
+construction, and `verify_dynamics` tests that by integrating work around a
+closed loop in configuration space.
+
+### The finding that survives all of that
+
+With the corrected models, **neither the as-built design nor the previous
+optimiser winner clears the pivot criterion**:
+
+| design | pivot work / barrier | simulated step |
+|---|---|---|
+| as built (LNG37 bare rod, n=8) | 1.39 | rocks 5 deg, falls back |
+| previous GA winner (LNGT44 pot core, n=8) | 1.24 | rocks 5 deg, falls back |
+
+Energy is necessary but not sufficient: the work has to arrive as rotation
+about the pivot edge, and part of it goes into sliding and friction.  A ratio
+near 1 is not enough; the constraint is now set at 1.5 and the optimiser can
+see it.
+
+**Locomotion by magnetic repulsion alone is marginal at n = 8.**  Raising n
+lowers the barrier (lift falls as `r(1/cos(pi/n) - 1)`: 1.60 mm at n=8, 0.24 mm
+at n=20) but adds faces, drivers and mass.  That trade is now inside the GA
+rather than assumed away.

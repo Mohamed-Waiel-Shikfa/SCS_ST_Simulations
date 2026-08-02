@@ -38,6 +38,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "simulations" / "Force_compute" / "python"))
 
 from axisym_fem import AxisymModel, Region, axial_force  # noqa: E402
+from compat import trapezoid  # noqa: E402
 from magnet_force import MU0, CoaxialRodPair, Material  # noqa: E402
 
 G = 9.81
@@ -158,7 +159,8 @@ def _regions(dsg, flip):
     return regs
 
 
-def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
+def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal",
+                     states=("attract", "repel")):
     """Attraction, repulsion and demagnetisation margin.
 
     Returns a dict.  ``margin`` is the worst |H|/Hcj over both states; above
@@ -170,6 +172,10 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
     that cost by an order of magnitude.  Rankings are preserved because the
     discretisation error is systematic across designs, but any design that
     matters should be re-run at "normal" before it is believed.
+
+    ``states`` restricts which operating points are solved.  The pivot work
+    integral needs the repulsion curve at several gaps and nothing else, and
+    solving the attracting state as well would double its cost for no use.
     """
     Rm = dsg.d_mag / 2
     ro = Rm + (dsg.r_clear + dsg.t_steel if dsg.circuit == "potcore" else 0.0)
@@ -200,29 +206,20 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal"):
 
     out = {}
     for flip, tag in ((False, "attract"), (True, "repel")):
+        if tag not in states:
+            continue
         m = AxisymModel(_regions(dsg, flip), rfar, zfar_k * dsg.l_mag, h,
                         n_slabs=n_slabs)
-        if fidelity == "screen":
-            # No continuation fallback while screening.  The designs that stall
-            # are the low-coercivity ones sitting on the knee, which are also
-            # the ones that fail the demagnetisation constraint anyway, so
-            # paying for an expensive recovery to confirm a rejection is waste.
-            s = m.solve(**kw)
-        else:
-            # "normal" already escalates internally (Newton -> continuation ->
-            # damped fixed point).  A second full retry on top of that just
-            # doubles the cost of a design that is going to fail anyway.
-            s = m.solve(**kw)
+        s = m.solve(**kw)
         J, H = m.region_state(s, "A")
         F = axial_force(s, dsg.gap / 2, r_max=0.9 * rfar, n=nq)
         out[f"J_{tag}"] = J
         out[f"margin_{tag}"] = abs(H) / hcj
-        out[f"F_{tag}"] = F
+        out[f"F_{tag}"] = abs(F)
 
-    out["F_attract"] = abs(out["F_attract"])
-    out["F_repel"] = abs(out["F_repel"])
-    out["asymmetry"] = out["F_attract"] / max(out["F_repel"], 1e-9)
-    out["margin"] = max(out["margin_attract"], out["margin_repel"])
+    if len(states) == 2:
+        out["asymmetry"] = out["F_attract"] / max(out["F_repel"], 1e-9)
+        out["margin"] = max(out["margin_attract"], out["margin_repel"])
     return out
 
 
@@ -279,7 +276,7 @@ def pivot_work(dsg, mag, n_theta=80, fidelity="screen", probe_gaps=(1e-3, 4e-3))
     forces = [mag["F_repel"]]
     for g in gaps[1:]:
         m = stage1_magnetics(Design(**{**dsg.as_row(), "gap": g}),
-                             fidelity=fidelity)
+                             fidelity=fidelity, states=("repel",))
         forces.append(m["F_repel"])
     gaps = np.array(gaps)
     forces = np.array(forces)
@@ -296,7 +293,7 @@ def pivot_work(dsg, mag, n_theta=80, fidelity="screen", probe_gaps=(1e-3, 4e-3))
 
     th = np.linspace(0.0, 2 * np.pi / dsg.n_gon, n_theta)
     s = _pivot_geometry(dsg.n_gon, dsg.r_face, th) + dsg.gap
-    W = float(np.trapz(F(s), s))
+    W = float(trapezoid(F(s), s))
     return dict(W_drive=max(W, 0.0), W_trail=W)
 
 
@@ -620,4 +617,5 @@ def evaluate(dsg, fidelity="normal", use_prescreen=True):
     sc = score(dsg, mag, mech, sw, drv)
     return _row(dsg, fidelity, mag, mech, sw, drv, sc["feasible"],
                 sc["scalar"], "; ".join(sc["violations"]))
+
 
