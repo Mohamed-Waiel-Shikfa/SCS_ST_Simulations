@@ -268,3 +268,77 @@ see it.
 lowers the barrier (lift falls as `r(1/cos(pi/n) - 1)`: 1.60 mm at n=8, 0.24 mm
 at n=20) but adds faces, drivers and mass.  That trade is now inside the GA
 rather than assumed away.
+
+---
+
+## 2026-08-03 - The OFF state: safe from neighbours, not safe from itself
+
+Per-face polarity control assumes a face can be switched off and STAY off.
+That had never been tested, and it is load-bearing: if a live neighbour
+re-magnetises an off face, latching, releasing and sequencing all fail.
+`off_state_study.py` tests it, keeping the exact results separate from the
+modelled ones.
+
+### Neighbours are not the problem (exact FEM, no free parameters)
+
+Field imposed inside an off magnet by a live neighbour 0.1 mm away:
+
+| design | Hcj | H in OFF face | as fraction of Hcj |
+|---|---|---|---|
+| as built, LNG37 bare rod | 49 kA/m | 14.8 kA/m | **0.30** |
+| LNGT44 pot core | 122 kA/m | 20.6 kA/m | **0.17** |
+| LNGT72 pot core | 114 kA/m | 25.8 kA/m | **0.23** |
+
+All comfortably below the coercivity, and the induced remanence estimated from
+a Preisach-style virgin curve is 0-1.2 % of Br.  The off state survives its
+neighbour, and it survives it for a satisfying reason: the flat top of an
+Alnico demagnetisation curve means almost no domains have switching fields in
+the lower part of the range.  **The same curve shape that makes the material
+switchable also protects the off state** - up to about 0.8 Hcj, beyond which
+the protection collapses.
+
+A bonus: the steel return path SHIELDS the off face rather than funnelling
+flux into it.  Same material and geometry, pot core versus bare rod, 0.17 Hcj
+against 0.24 Hcj - the pot core sees **0.70x** the field.  The keeper gives the
+neighbour's flux an easier path than through the magnet.
+
+Caveat: the FEM is axisymmetric, so this is one neighbour.  A face in a full
+lattice has several, and that superposition has not been computed.
+
+### The magnet is the problem (exact, using the existing recoil model)
+
+A magnet pulsed until J = 0 does **not** stay at zero.  When the pulse ends it
+recoils along a line of slope mu_rec back to its operating point, and recoil
+raises J:
+
+| design | operating point | J after recoil | as % of Br | residual force | vs module weight |
+|---|---|---|---|---|---|
+| LNG37 bare rod | -14.8 kA/m | 0.129 T | 10.7 % | 0.018 N | 0.02 |
+| LNGT44 pot core | -20.6 kA/m | 0.127 T | 14.5 % | 0.091 N | 0.10 |
+| LNGT72 pot core | -25.8 kA/m | 0.111 T | 10.6 % | **0.422 N** | **0.48** |
+
+So an untuned off pulse leaves LNGT72 holding nearly half the module's weight.
+That is not enough to defeat gravity outright, but it is a large parasitic
+force in a machine whose entire job is to attach and detach on command.
+
+This is a **control** requirement, not a materials one: the pulse must
+overshoot past J = 0 so the magnet lands at zero AFTER recoil.  Marchese et al.
+arrived at their off state by empirically sweeping pulse length, which is
+exactly consistent with this.
+
+### The part that should worry the optimiser
+
+The recoil is `mu0 (mu_rec - 1) (Hcj - |H_op|)`, so **higher coercivity means a
+larger residual for the same pulse error**.  The GA is being driven towards
+high-coercivity Alnico by the repulsion and pivot objectives, and that same
+choice makes the off state harder to hit accurately.  Nothing in the current
+objective set sees this.  It is a real tension and it is not yet priced.
+
+### A solver bug this exposed
+
+`solve()` scaled its convergence tolerance on `saturated()[0]` - slab 0 only.
+A mixed configuration, one face off next to a live one, has J = 0 in the first
+region, so the tolerance collapsed to 1e-13 and every such solve failed for a
+purely numerical reason.  Now scaled on the strongest slab.  Worth noting that
+this is the normal state of a module in a lattice, so it would have bitten any
+attempt to model an assembly rather than an isolated pair.

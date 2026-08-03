@@ -614,7 +614,13 @@ class AxisymModel:
         # on a 0.05 T operating point it is not.  Using an absolute test
         # rejected perfectly good solutions for short wide magnets, which sit
         # deep below the knee and are exactly the geometries of interest.
-        Jsat = max(abs(float(saturated()[0])), 1e-9)
+        #
+        # Scale on the STRONGEST slab, not slab 0.  A mixed configuration - one
+        # face switched off next to a live one, which is the normal state of a
+        # module in a lattice - has J = 0 in the first region, and reading the
+        # scale off that slab drove the tolerance to 1e-13 and made every such
+        # solve fail for a purely numerical reason.
+        Jsat = max(float(np.max(np.abs(saturated()))), 1e-9)
         tol_ok = 1e-4 * Jsat
         tol_accept = 1e-3 * Jsat
 
