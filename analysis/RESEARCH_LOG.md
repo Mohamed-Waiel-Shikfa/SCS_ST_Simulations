@@ -342,3 +342,95 @@ region, so the tolerance collapsed to 1e-13 and every such solve failed for a
 purely numerical reason.  Now scaled on the strongest slab.  Worth noting that
 this is the normal state of a module in a lattice, so it would have bitten any
 attempt to model an assembly rather than an isolated pair.
+
+---
+
+## 2026-08-03 - The GA run, and the pivot verdict reversed
+
+994 evaluations, seed 1, pop 40, 25 generations.  519 feasible.  Verified at
+FULL fidelity, not screening.
+
+### What the search chose, unprompted
+
+| axis | outcome |
+|---|---|
+| material | **LNGT72 (Alnico 9) in 494 of 519** feasible designs |
+| circuit | **pot core in 519 of 519** - a bare rod never survives |
+| n | n=12 in 296, n=8 in 223 |
+
+The material result independently reproduces the hand analysis from the grade
+sweep, which is worth something: two different routes to the same answer.
+
+Rejection reasons: hold 197, **pivot 152**, demag margin 92, electronics do not
+fit 31.  The pivot constraint is doing real work, and the feasible set sits on
+its boundary - min 1.50, median 2.00.
+
+### Full fidelity confirms screening, within its stated error
+
+| design | Fa screen | Fa full | error | pivot screen | pivot full |
+|---|---|---|---|---|---|
+| best scalar | 27.82 N | 26.71 N | -4.0 % | 2.64 | 2.55 |
+| lightest | 8.71 N | 8.17 N | -6.2 % | 2.31 | 2.25 |
+
+`screening_study.py` predicted a 4.2 % median error.  It delivered 4-6 %.  The
+surrogate is behaving as characterised, which is the point of having measured
+it rather than assumed it.
+
+**Best scalar:** LNGT72, n=8, r_face 21.6 mm, D 7.42 x L 7.00 mm, pot core.
+26.7 N attract, 2.63 N repel, 142 g, holds 19x its weight.
+
+**Lightest feasible:** LNGT72, n=8, r_face 18.3 mm, D 4.30 x L 4.03 mm.
+8.17 N attract, 42 g, holds 20x its weight.  This is the one a builder would
+reach for: a third of the mass for a third of the force, same hold ratio.
+
+### The pivot verdict is REVERSED
+
+The previous entry concluded the pivot does not work at n = 8.  **That was
+wrong, and it was wrong because the force model was.**  With the conservative
+pair wrench and the 1/r^4 far tail in place, every design pivots:
+
+| design | ratio | simulated | verdict |
+|---|---|---|---|
+| as-built baseline | 1.39 | 43.8 deg of 45 | **pivots** (97 %) |
+| GA lightest | 2.25 | 46.3 deg of 45 | **pivots** (103 %) |
+| GA best scalar | 2.55 | 140.1 deg of 45 | overshoots, 3.1 steps |
+| GA best pivot margin | 3.00 | 132.0 deg of 45 | overshoots, 2.9 steps |
+
+The baseline pivots at ratio 1.39, below the 1.5 constraint.  So the constraint
+is slightly conservative at the bottom - which is the safe direction, but worth
+knowing.
+
+### The new problem is control, not force
+
+Holding the repel drive on and sweeping n, with the same magnet:
+
+| n | ratio | simulated, as % of one step |
+|---|---|---|
+| 8 | 2.55 | 296 % |
+| 12 | 3.78 | **100 %** |
+| 16 | 4.91 | 960 % |
+| 20 | 5.95 | 128 % |
+
+Not monotonic, not close to it.  Tumbling is **chaotic**: whether the module
+stops on the next face or carries on depends on exactly how it lands and
+whether it catches an edge.  So the number of steps is not a design parameter
+and cannot be made one by adding force.
+
+The consequence is a timing requirement, and it is now quantified: one step
+completes in **140-280 ms**, faster for the stronger designs.  The drive has to
+be cut inside that window.  Locomotion is a pulsed, timed operation - it cannot
+be done by switching a face on and waiting.
+
+**This says `pivot_ratio` should be a BAND, not a floor.**  Something like
+1.3 to 2.0.  Below it the module cannot climb; above it, the extra magnet mass
+and switching energy buy nothing but a harder control problem.  The current
+objective set rewards force without limit and the search duly spent 142 g
+getting 26.7 N when 42 g and 8.2 N pivots just as well.
+
+### A mode that does not work
+
+Energising the NEXT face pair round the ring to pull the module over does
+nothing at all - 0.0 degrees in every case.  At n = 8 that pair starts 11 mm
+apart, and the force there is three orders below the contact force.  **Pivoting
+must be driven by repulsion from the face the module is already standing on.**
+There is no reach-ahead mode.

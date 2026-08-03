@@ -27,17 +27,22 @@ from framework import (Design, stage1_magnetics, stage2_mechanics,  # noqa: E402
                        stage3_switching)
 from module import build_module, pivot_angle  # noqa: E402
 from pivot import hull_vertices, run_pivot  # noqa: E402
+from verify_best import from_csv  # noqa: E402
 
 DESIGNS = {
     "baseline (LNG37 bare rod)": dict(
         material="LNG37", circuit="none", n_gon=8, r_face=19.4e-3,
         d_mag=4.75e-3, l_mag=12.5e-3, t_steel=0.5e-3, r_clear=0.0,
         gap=0.1e-3, wire_d=0.3e-3, v_cap=30.0, c_cap=10e-6),
-    "optimised (LNGT44 pot core)": dict(
-        material="LNGT44", circuit="potcore", n_gon=8, r_face=19.4e-3,
-        d_mag=4.2e-3, l_mag=8.4e-3, t_steel=1.0e-3, r_clear=0.6e-3,
-        gap=0.1e-3, wire_d=0.25e-3, v_cap=90.0, c_cap=100e-6),
 }
+CSV = HERE / "ga_front.csv"
+if CSV.exists():
+    for kw, _ in from_csv(CSV, "scalar", True, 1):
+        DESIGNS["GA best scalar"] = kw
+    for kw, _ in from_csv(CSV, "m_module", False, 1):
+        DESIGNS["GA lightest"] = kw
+    for kw, _ in from_csv(CSV, "pivot_ratio", True, 1):
+        DESIGNS["GA best pivot margin"] = kw
 
 print("=" * 84)
 print("PIVOT MANOEUVRE: static estimate vs simulated")
@@ -81,20 +86,35 @@ for label, kw in DESIGNS.items():
         dx = (tr[-1]["x"] - tr[0]["x"]) * 1e3
         verdict = ("PIVOTED" if settled > 0.7 * target
                    else ("rocked back" if peak > 5 else "no motion"))
+        if settled > 1.5 * target:
+            verdict = f"OVERSHOT ({settled/target:.1f} steps)"
         print(f"    drive={mode:<6} peak {peak:5.1f} deg, settled "
               f"{settled:5.1f} deg ({settled/target*100:3.0f} % of target), "
               f"rise {(zmax-mod.r_face)*1e3:+.2f} mm, moved {dx:+6.1f} mm"
               f"   -> {verdict}")
+        if mode == "repel":
+            t_step = next((t["t"] for t in tr if abs(t["ang"]) >= target),
+                          None)
+            if t_step:
+                print(f"                   reaches one step at "
+                      f"{t_step*1e3:.0f} ms, so the drive must be cut within "
+                      f"that to stop cleanly")
+
+print("\n  'reach' - energising the NEXT face pair round the ring to pull the")
+print("  module over - does nothing at all.  That pair starts 11 mm apart at")
+print("  n = 8, and the force at 11 mm is three orders below the force at")
+print("  contact.  Pivoting has to be driven by REPULSION from the face the")
+print("  module is already on; there is no useful 'reach ahead' mode.")
 
 print("\n" + "=" * 84)
-print("DOES A HIGHER n FIX IT?")
+print("HOW MUCH n?")
 print("A larger polygon lifts the centre of mass less per step, so the barrier")
-print("falls faster than the available work does.")
+print("falls; but it also adds faces, drivers and mass.")
 print("=" * 84)
 print(f"\n{'n':>4}{'faces':>7}{'mass g':>8}{'step':>7}{'lift mm':>9}"
       f"{'barrier uJ':>12}{'W_drive uJ':>12}{'ratio':>8}"
       f"{'sim settled':>13}{'of step':>9}")
-base = DESIGNS["optimised (LNGT44 pot core)"]
+base = DESIGNS.get("GA best scalar") or list(DESIGNS.values())[-1]
 for n in (8, 12, 16, 20):
     kw = {**base, "n_gon": n}
     d = Design(**kw)
