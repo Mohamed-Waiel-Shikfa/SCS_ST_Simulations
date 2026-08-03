@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Magnobots design explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="logo"></span>
+    <div>
+      <h1>Magnobots design explorer</h1>
+      <p class="sub" id="subtitle">loading pipeline metadata&hellip;</p>
+    </div>
+  </div>
+  <nav id="tabs">
+    <button data-tab="matrix" class="active">Design matrix</button>
+    <button data-tab="config">Configure &amp; run</button>
+    <button data-tab="magnetics">Magnetics</button>
+    <button data-tab="mechanics">Mechanics</button>
+    <button data-tab="driver">Driver</button>
+    <button data-tab="module">Module</button>
+    <button data-tab="dynamics">Dynamics</button>
+    <button data-tab="validation">Validation</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ================================================== DESIGN MATRIX -->
+<section id="tab-matrix" class="tab active">
+  <div class="toolbar">
+    <label>source
+      <select id="mx-file"></select>
+    </label>
+    <label>show
+      <select id="mx-filter">
+        <option value="all">all designs</option>
+        <option value="feasible" selected>feasible only</option>
+        <option value="infeasible">infeasible only</option>
+      </select>
+    </label>
+    <label>search
+      <input id="mx-search" type="search" placeholder="material, violation&hellip;">
+    </label>
+    <span class="spacer"></span>
+    <span class="pill" id="mx-count">&mdash;</span>
+    <button id="mx-export" class="ghost">Export view as CSV</button>
+  </div>
+
+  <div class="split">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Trade-off explorer</h2>
+        <div class="axis-picks">
+          <label>x <select id="sc-x"></select></label>
+          <label>y <select id="sc-y"></select></label>
+          <label>colour <select id="sc-c"></select></label>
+          <label class="check"><input type="checkbox" id="sc-logx"> log x</label>
+          <label class="check"><input type="checkbox" id="sc-logy"> log y</label>
+        </div>
+      </div>
+      <div id="scatter"></div>
+      <p class="note" id="sc-note"></p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Selected design</h2></div>
+      <div id="mx-detail" class="detail-empty">
+        Click a point on the plot, or a row in the table.
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2>All rows</h2>
+      <div class="axis-picks">
+        <label>columns
+          <select id="mx-preset">
+            <option value="key">key results</option>
+            <option value="geometry">geometry</option>
+            <option value="electrical">electrical</option>
+            <option value="all">everything</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div class="table-wrap"><table id="mx-table"></table></div>
+    <div class="pager">
+      <button id="mx-prev" class="ghost">&larr; prev</button>
+      <span id="mx-page"></span>
+      <button id="mx-next" class="ghost">next &rarr;</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================== CONFIGURE -->
+<section id="tab-config" class="tab">
+  <div class="split cfg">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Configuration</h2>
+        <div class="axis-picks">
+          <select id="cfg-preset"><option value="">load a preset&hellip;</option></select>
+        </div>
+      </div>
+      <form id="cfg-form"></form>
+      <div class="run-row">
+        <label>fidelity
+          <select id="cfg-fidelity">
+            <option value="screen">screening (fast, ~4% error)</option>
+            <option value="normal">full (slow, believable)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="cfg-dyn"> run MuJoCo dynamics</label>
+        <button id="cfg-run" class="primary">Evaluate</button>
+      </div>
+      <div id="cfg-progress" class="progress hidden">
+        <div class="bar"><div id="cfg-bar"></div></div>
+        <span id="cfg-stage"></span>
+      </div>
+      <p class="note" id="cfg-note"></p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Result</h2></div>
+      <div id="cfg-result" class="detail-empty">
+        Set a configuration and press Evaluate. Every number comes from the
+        same pipeline the optimiser used.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================== STAGE TABS -->
+<section id="tab-magnetics" class="tab">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Stage 1 &mdash; magnetics</h2>
+      <span class="pill" id="mag-badge">no design loaded</span>
+    </div>
+    <p class="note">
+      Nonlinear axisymmetric FEM with the 1018 steel B&ndash;H curve. The field map
+      is the solution the force integral is taken from, not a redrawing of it.
+    </p>
+    <div class="fig-row">
+      <figure><figcaption>Attract state</figcaption><img id="fig-field-a" alt=""></figure>
+      <figure><figcaption>Repel state</figcaption><img id="fig-field-r" alt=""></figure>
+    </div>
+    <div class="fig-row">
+      <figure class="wide"><figcaption>Force and operating point vs gap</figcaption><img id="fig-force" alt=""></figure>
+      <figure class="wide"><figcaption>Demagnetisation curves</figcaption><img id="fig-demag" alt=""></figure>
+    </div>
+  </div>
+</section>
+
+<section id="tab-mechanics" class="tab">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Stage 2 &mdash; mechanics</h2>
+      <span class="pill" id="mech-badge">no design loaded</span>
+    </div>
+    <div id="mech-cards" class="cards"></div>
+    <div class="fig-row">
+      <figure class="wide"><figcaption>Pivot work integral vs gravitational barrier</figcaption><img id="fig-pivot" alt=""></figure>
+    </div>
+  </div>
+</section>
+
+<section id="tab-driver" class="tab">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Stage 3 &mdash; switching and driver</h2>
+      <span class="pill" id="drv-badge">no design loaded</span>
+    </div>
+    <div id="drv-cards" class="cards"></div>
+    <div class="fig-row">
+      <figure class="wide"><figcaption>Switching pulse</figcaption><img id="fig-pulse" alt=""></figure>
+      <div class="panel inner"><h3>Bill of materials</h3><div id="drv-bom"></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="tab-module" class="tab">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Stage 4 &mdash; module geometry</h2>
+      <span class="pill" id="mod-badge">no design loaded</span>
+    </div>
+    <p class="note">
+      The intersection of three orthogonal regular n-gon prisms &mdash; not a cube.
+      3n&minus;6 square faces, one EPM each; the pivot step is 360/n.
+      Drag to rotate.
+    </p>
+    <div class="split">
+      <div><div id="module3d"></div>
+        <div class="view-ctl">
+          <label class="check"><input type="checkbox" id="m3-faces" checked> face discs</label>
+          <label class="check"><input type="checkbox" id="m3-labels"> face numbers</label>
+          <label class="check"><input type="checkbox" id="m3-cube"> bounding cube</label>
+        </div>
+      </div>
+      <div id="mod-cards" class="cards vertical"></div>
+    </div>
+  </div>
+</section>
+
+<section id="tab-dynamics" class="tab">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>Stage 5 &mdash; MuJoCo dynamics</h2>
+      <span class="pill" id="dyn-badge">not run</span>
+    </div>
+    <p class="note">
+      Rigid-body simulation on the real polyhedron with a conservative
+      pair-wrench force model. Energy is checked around a closed loop, so the
+      magnets cannot manufacture the work needed to climb.
+      Tick <em>run MuJoCo dynamics</em> on the Configure tab.
+    </p>
+    <div id="dyn-cards" class="cards"></div>
+    <div class="split">
+      <div class="panel inner"><h3>Latch and repel &mdash; separation</h3><div id="dyn-sep"></div></div>
+      <div class="panel inner"><h3>Pivot &mdash; rotation</h3><div id="dyn-piv"></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="tab-validation" class="tab">
+  <div class="panel">
+    <div class="panel-head"><h2>Validation against measured data</h2></div>
+    <p class="note">
+      This is the ground truth the whole pipeline rests on: the force engine
+      against the bench measurements. Everything downstream inherits this
+      accuracy. First render fits two free parameters and takes a couple of
+      minutes; after that it is cached.
+    </p>
+    <div class="fig-row">
+      <figure class="wide"><img id="fig-exp" alt=""></figure>
+    </div>
+    <div id="verif-list"></div>
+  </div>
+</section>
+
+</main>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -8,3 +8,8 @@ analysis/*.log
 # partially finished run to another machine, force-add it:
 #     git add -f analysis/ga_state.json
 analysis/ga_state.json
+
+# design explorer scratch
+analysis/viz/_probe/
+analysis/viz/**/__pycache__/
+.playwright-mcp/
