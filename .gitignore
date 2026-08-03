@@ -13,3 +13,4 @@ analysis/ga_state.json
 analysis/viz/_probe/
 analysis/viz/**/__pycache__/
 .playwright-mcp/
+MUJOCO_LOG.TXT
