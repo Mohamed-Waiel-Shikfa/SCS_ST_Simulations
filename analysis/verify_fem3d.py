@@ -8,21 +8,22 @@ part that did not come out well.
 
 Summary of the result, so it is not buried:
 
-* **Magnets without a return path: verified.**  Against the validated
-  one-dimensional magnetisation solver and against the axisymmetric FEM, the
-  operating point agrees to about 2 % and the force to 2-5 %, converging under
-  refinement and stable to a couple of per cent across discretisations at
-  every angle tested.
+* **Magnets without a return path: verified.**  The open-circuit operating
+  point agrees with the validated one-dimensional solver to between 4 and 7 %,
+  converging from below as the cells are refined; force against the
+  axisymmetric FEM is within 4 % on attraction and 10 % on repulsion; and the
+  angular dependence is stable across discretisations to between 1 and 15 %,
+  tightest at the pivot angles that matter.
 * **Magnets inside a steel pot core: NOT verified, and the two solvers
-  disagree.**  The magnet operating point still agrees to 1.3 %, but the force
-  does not: the 3-D solver reads about 20 % high on attraction and three times
-  high on repulsion.  The disagreement is unchanged when both solvers are
-  forced to use linear iron, so it is not saturation modelling.  Since J
-  agrees and F does not, the two models are splitting the flux differently
-  between the pole face and the annulus rim, and the repelling force is a
-  small difference between a large pole-to-pole repulsion and a large
-  pole-to-rim attraction - so a modest error in that split becomes a large
-  error in the total.
+  disagree.**  The magnet operating point still agrees to about 1 %, but the
+  force does not: the 3-D solver reads about 22 % high on attraction and
+  roughly 2.6 times high on repulsion.  The disagreement is unchanged when
+  both solvers are forced to use linear iron, so it is not saturation
+  modelling.  Since J agrees and F does not, the two models are splitting the
+  flux differently between the pole face and the annulus rim, and the
+  repelling force is a small difference between a large pole-to-pole repulsion
+  and a large pole-to-rim attraction - so a modest error in that split becomes
+  a large error in the total.
 
 Neither model has experimental validation for the pot-core geometry - the
 measured data in this repository is for bare rods - so this is an open

@@ -64,9 +64,9 @@ force error and is only justified for ranking.  Every result is badged with
 which produced it.
 
 **Disagreements are shown, not smoothed.**  The 3-D solver and the
-axisymmetric FEM disagree for pot-core geometries and neither is validated
-against measurement for that case; the field panel says so whenever steel is
-included.  A design whose winning material is a "lit" row is a research
+axisymmetric FEM disagree for pot-core geometries - 22 % on attraction and
+about 2.6x on repulsion - and neither is validated against measurement for
+that case; the field panel says so whenever steel is included.  A design whose winning material is a "lit" row is a research
 result, not a bill of materials, and the material table marks it.
 
 **A gated design says so.**  If switching fails, the Mechanics tab explains

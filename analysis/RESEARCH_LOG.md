@@ -570,13 +570,14 @@ between fully magnetised and fully demagnetised.
 ### An open discrepancy, not resolved
 
 After all of that: **for magnets with no return path the 3-D solver is
-verified** - 2 % on the operating point against the validated 1-D solver,
-2-5 % on force against the axisymmetric FEM, converging under refinement and
-stable to about 2 % across discretisations at every angle.
+verified** - 4 to 7 % on the operating point against the validated 1-D solver,
+within 4 % on attraction and 10 % on repulsion against the axisymmetric FEM,
+and stable across discretisations to between 1 and 15 % at every angle,
+tightest at the pivot angles that matter.
 
 **With a steel pot core the two solvers disagree.**  The magnet operating
-point still agrees to 1.3 %, but the force does not: the 3-D solver reads
-about 20 % high on attraction and three times high on repulsion.  Forcing both
+point still agrees to about 1 %, but the force does not: the 3-D solver reads
+about 22 % high on attraction and roughly 2.6 times high on repulsion.  Forcing both
 to use linear iron changes nothing, so it is not saturation.  Since J agrees
 and F does not, the two models are splitting the flux differently between the
 pole face and the annulus rim - and the repelling force is a small difference

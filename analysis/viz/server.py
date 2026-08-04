@@ -206,13 +206,15 @@ def meta():
                    "ranking, not for quoting.",
             normal="Full fidelity, h = min(D,L)/16. Slower by roughly 10x. "
                    "This is what any believed number must come from.",
-            fem3d="Verified against the axisymmetric FEM for magnets with no "
-                  "return path: 2 % on the operating point, 2-5 % on force, "
-                  "stable across discretisations at every angle. With a "
-                  "steel pot core the two solvers disagree - 20 % on "
-                  "attraction, 3x on repulsion - and neither is validated "
-                  "against measurement for that case, so all magnitudes in "
-                  "this tool come from the axisymmetric solver."))))
+            fem3d="Verified against the axisymmetric FEM and the validated "
+                  "1-D solver for magnets with no return path: 4-7 % on the "
+                  "operating point, within 4 % on attraction and 10 % on "
+                  "repulsion, and stable across discretisations at every "
+                  "angle. With a steel pot core the two solvers disagree - "
+                  "22 % on attraction and about 2.6x on repulsion - and "
+                  "neither is validated against measurement for that case, "
+                  "so all magnitudes in this tool come from the axisymmetric "
+                  "solver."))))
 
 
 @app.route("/api/matrix/files")
