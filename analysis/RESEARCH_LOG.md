@@ -648,3 +648,37 @@ per-material.  The design that was previously reported as the winner now comes
 out at a pivot ratio of 1.46 against the required 1.5 - marginal rather than
 feasible.  The binding constraints across the search are the pivot bound and
 the electronics packing, in that order.
+
+## The run, and one thing to be careful reading
+
+1879 distinct designs over 50 generations of 30, seed 1, 42 minutes on 18
+cores.  The population was entirely infeasible until generation 20 - the
+constrained-domination machinery spent twenty generations driving total
+violation down before anything crossed the line - and reached 30 of 30
+feasible by generation 26.  The binding constraints throughout were the pivot
+bound and the electronics packing, in that order.
+
+The final local search moved the winner from a merit of 0.114 to 0.191 in 200
+evaluations, walking r_face up twice, the clearance fraction down, and the
+bank voltage up three times.  That is a 68 % improvement on a design the GA
+had already converged on, and it is the clearest evidence that a
+population-based search alone leaves real value on the table: polynomial
+mutation only makes small steps by luck.
+
+**Reading the transient of a Pareto design.**  The bank voltage is a free
+variable and the energy objective normalises it away: `e_required` is the
+energy needed at `v_need`, the voltage that just reaches the switching
+threshold, and the driver is selected for `v_need` too.  So a design can sit
+on the front with `v_cap` at its upper bound and a switching margin of
+thirteen, and the transient recorded for it is then grossly over-driven -
+the winning design reports 636 A and a nominal 9.7 T in the iron, which is
+not a physical operating point but the simulation of a bank thirteen times
+larger than the design needs.  The numbers that mean something for that design
+are `v_need` (22 V), `e_switch` (10.5 mJ per face), and the driver actually
+selected.  The `switched` gate deliberately stays at the specified `v_cap`,
+because that is what makes `v_cap` a real design variable rather than a
+derived one.
+
+This is a reporting hazard rather than an error - the objective, the driver
+selection and the mass budget are all consistent with `v_need` - but it is
+worth knowing before quoting a peak current out of the matrix.

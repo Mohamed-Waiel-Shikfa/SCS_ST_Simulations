@@ -671,6 +671,14 @@ def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
                 rows = ev_many(pop)
             refined = dict(index=k, before=before, after=m_new,
                            evals=used, history=hist)
+            # Checkpoint AFTER the final refinement, not only before it.
+            # Otherwise the 200 evaluations that produced the winning design -
+            # including the winner itself - are absent from the saved state,
+            # and the design matrix written from that state does not contain
+            # the design the run reports as best.
+            if checkpoint:
+                save_checkpoint(checkpoint, generations, pop, cache, rng,
+                                history, cfg)
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
@@ -688,14 +696,23 @@ def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
     return res
 
 
-def write_rows(path, rows):
+def write_rows(path, rows, append=False):
+    """Write the design matrix.
+
+    Overwrites by default.  Appending was the old behaviour and it silently
+    mixed schemas: a rerun after the row fields changed left the file with the
+    previous run's columns for its first thousand rows and the new ones after,
+    so the "best design" read back out of it was a stale row from a model that
+    no longer exists.  A run writes its own matrix; use ``append`` only when
+    deliberately accumulating separate sweeps.
+    """
     from framework import ROW_FIELDS
     path = Path(path)
-    new = not path.exists()
-    with open(path, "a", newline="") as fh:
+    mode = "a" if (append and path.exists()) else "w"
+    with open(path, mode, newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(ROW_FIELDS),
                            extrasaction="ignore")
-        if new:
+        if mode == "w":
             w.writeheader()
         for r in rows:
             w.writerow({k: r.get(k) for k in ROW_FIELDS})
