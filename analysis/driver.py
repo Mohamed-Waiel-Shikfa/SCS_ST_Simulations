@@ -129,6 +129,11 @@ class Driver:
     recharge_s: float
     feasible: bool
     notes: str
+    cap_mass: float = 0.0
+    cap_volume: float = 0.0
+    batt_mass: float = 0.0
+    batt_volume: float = 0.0
+    batt_wh: float = 0.0
 
     def bom(self):
         return (f"{self.n_caps} x {self.cap_name}; {self.n_fets} x "
@@ -203,7 +208,11 @@ def select_driver(v_need, l_coil, r_coil, n_turns, mmf_need, n_faces=18,
                                       n_fets, v_target, c_tot, e_bank, i_peak,
                                       mass, vol, price, recharge, True,
                                       "underdamped" if underdamped
-                                      else "overdamped")
+                                      else "overdamped",
+                                      cap_mass=n_caps * cmass,
+                                      cap_volume=n_caps * cvol,
+                                      batt_mass=b_mass, batt_volume=b_vol,
+                                      batt_wh=batt_wh)
                         if best is None or cand.volume < best.volume:
                             best = cand
     if best is None:

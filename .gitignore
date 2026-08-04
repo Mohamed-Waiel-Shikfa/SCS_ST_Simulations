@@ -14,3 +14,6 @@ analysis/viz/_probe/
 analysis/viz/**/__pycache__/
 .playwright-mcp/
 MUJOCO_LOG.TXT
+
+analysis/viz/server.log
+analysis/ga_run.log

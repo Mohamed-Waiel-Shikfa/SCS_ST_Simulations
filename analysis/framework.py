@@ -1,21 +1,37 @@
-"""Design-space definition and the three evaluation stages for an EPM module.
+"""Design-space definition and the evaluation stages for an EPM module.
 
-This is the evaluation core the optimiser will call.  It is deliberately kept
+This is the evaluation core the optimiser calls.  It is deliberately kept
 separate from any search algorithm so the two can be validated independently.
 
-    Stage 1  magnetics   attraction, repulsion, demagnetisation margin
-    Stage 2  mechanics   can a module actually latch, hold and pivot
-    Stage 3  switching   can the coil reverse the magnet, and at what energy
+Stage order, and why it is this order
+-------------------------------------
+Every stage is built on the output of the one before it, and nothing is
+evaluated before the thing it depends on exists:
 
-Every stage returns physical quantities in SI units.  Scoring and constraint
-handling live in ``score()`` at the bottom so the objectives can be changed
-without touching the physics.
+    Stage 0  module      the physical assembly: magnets, multi-layer coils,
+                         steel, capacitor, battery, board, and what space is
+                         left.  Everything downstream is measured against
+                         this geometry.
+    Stage 1  magnetics   attraction, repulsion, demagnetisation margin, and
+                         the effective demagnetising factor n_eff of the real
+                         magnetic circuit - which is what the driver needs.
+    Stage 2  switching   the transient circuit, driven with the inductance and
+                         field-per-ampere that Stage 1 measured, including the
+                         steel, the magnet's own permeability and a latched
+                         neighbour.  Pulse trains are searched here.
+    Stage 3  mechanics   latching, holding, and the pivot energy balance.
+
+Mechanics runs LAST and only if switching succeeded.  A design whose coil
+cannot reverse its magnet is not a robot, whatever its holding force, so
+simulating its gait is wasted time - and since mechanics is the expensive
+stage, gating it is where most of the run time is saved.
 
 Design notes
 ------------
-* Material is a live variable, not a fixed choice.  The material sweep showed a
-  genuine interior optimum: coercivity buys repulsion and costs switching
-  energy.
+* Material is a live variable over every commercially available class with
+  Hcj below 2000 kA/m, not one family.  Coercivity buys repulsion and costs
+  switching energy, and the point of the search is to find where that trade
+  lands.
 * The attract/repel asymmetry is carried as an explicit objective to minimise,
   because a design that latches strongly but cannot push is useless for
   locomotion.
@@ -38,52 +54,16 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "simulations" / "Force_compute" / "python"))
 
 from axisym_fem import AxisymModel, Region, axial_force  # noqa: E402
+from coil import circuit as mag_circuit  # noqa: E402
+from coil import estimate_n_eff, n_eff_from_fem, wind  # noqa: E402
 from compat import trapezoid  # noqa: E402
-from magnet_force import MU0, CoaxialRodPair, Material  # noqa: E402
+from magnet_force import MU0, CoaxialRodPair  # noqa: E402
+from materials import MATERIALS, material  # noqa: E402
 
 G = 9.81
-RHO_ALNICO = 7300.0
 RHO_STEEL = 7870.0
 RHO_SHELL = 1240.0      # PLA
 RHO_CU = 1.68e-8
-
-# --------------------------------------------------------------------------
-# Materials.  Vendor rows are from simulations/Force_compute/Alnico性能表.png
-# and correspond to orderable parts.  "lit" rows are typical published values
-# for the material class and would need a real datasheet before being designed
-# in.  mu_rec: the Alnico 5 family recoils strongly (~4); the more anisotropic
-# Alnico 8/9 are straighter (~2); ferrite is nearly linear (~1.1).
-# --------------------------------------------------------------------------
-MATERIALS = {
-    #  name              Br     Hcb    Hcj   BHmax  mu_rec  source
-    "LNG13":    dict(Br=0.68, Hcb=48e3, Hcj=51e3, BHmax=13e3, mu_rec=4.0, src="vendor"),
-    "LNG37":    dict(Br=1.20, Hcb=48e3, Hcj=49e3, BHmax=37e3, mu_rec=4.0, src="vendor"),
-    "LNG40":    dict(Br=1.25, Hcb=48e3, Hcj=49e3, BHmax=40e3, mu_rec=4.0, src="vendor"),
-    "LNG52":    dict(Br=1.30, Hcb=56e3, Hcj=57e3, BHmax=52e3, mu_rec=4.0, src="vendor"),
-    "LNG60":    dict(Br=1.35, Hcb=59e3, Hcj=60e3, BHmax=60e3, mu_rec=4.0, src="vendor"),
-    "LNGT28":   dict(Br=1.00, Hcb=58e3, Hcj=59e3, BHmax=28e3, mu_rec=3.5, src="vendor"),
-    "LNGT18":   dict(Br=0.58, Hcb=90e3, Hcj=92e3, BHmax=18e3, mu_rec=2.5, src="vendor"),
-    "LNGT38":   dict(Br=0.80, Hcb=110e3, Hcj=112e3, BHmax=38e3, mu_rec=2.0, src="vendor"),
-    "LNGT44":   dict(Br=0.88, Hcb=120e3, Hcj=122e3, BHmax=44e3, mu_rec=2.0, src="vendor"),
-    "LNGT36J":  dict(Br=0.70, Hcb=140e3, Hcj=148e3, BHmax=36e3, mu_rec=2.0, src="vendor"),
-    "LNGT60":   dict(Br=0.90, Hcb=110e3, Hcj=112e3, BHmax=60e3, mu_rec=2.0, src="vendor"),
-    "LNGT72":   dict(Br=1.05, Hcb=112e3, Hcj=114e3, BHmax=72e3, mu_rec=2.0, src="vendor"),
-    "FeCrCo28": dict(Br=1.05, Hcb=44e3, Hcj=46e3, BHmax=28e3, mu_rec=4.0, src="lit"),
-    "FeCrCo42": dict(Br=1.20, Hcb=59e3, Hcj=62e3, BHmax=42e3, mu_rec=3.5, src="lit"),
-    "Ferrite30": dict(Br=0.38, Hcb=175e3, Hcj=195e3, BHmax=27e3, mu_rec=1.1, src="lit"),
-}
-
-_MAT_CACHE = {}
-
-
-def material(name):
-    """Fitted Material object for a catalogue entry (cached: the fit is slow)."""
-    if name not in _MAT_CACHE:
-        d = MATERIALS[name]
-        _MAT_CACHE[name] = Material.from_datasheet(
-            name, Br=d["Br"], Hcb=d["Hcb"], Hcj=d["Hcj"], BHmax=d["BHmax"],
-            mu_rec=d["mu_rec"])
-    return _MAT_CACHE[name]
 
 
 # --------------------------------------------------------------------------
@@ -101,22 +81,37 @@ class Design:
     l_mag: float = 12.5e-3       # magnet length
     circuit: str = "potcore"     # "none" or "potcore"
     t_steel: float = 1.0e-3      # keeper wall thickness
-    r_clear: float = 1.0e-3      # radial clearance rod -> return annulus
+    r_clear: float = 1.0e-3      # radial clearance around the winding
     gap: float = 0.1e-3          # working air gap between mated faces
     n_gon: int = 8               # ring polygon: 8, 12, 16, 20
     r_face: float = 20e-3        # centre to pole face
     wire_d: float = 0.3e-3       # coil wire diameter
+    n_layers: int = 4            # winding layers - a real variable now, not
+                                 # borrowed from the keeper thickness
     v_cap: float = 70.0          # capacitor bank voltage
     c_cap: float = 10e-6         # capacitor bank capacitance
+    pulse_mode: str = "single"   # "single" or "train"
+    f_pulse: float = 20e3        # pulse-train frequency
+    duty: float = 0.5            # pulse-train duty cycle
+    n_pulses: int = 4
 
     @property
     def n_faces(self):
         return 3 * self.n_gon - 6
 
     @property
+    def n_latch_faces(self):
+        """Always six: the axis faces, which is what keeps the lattice cubic."""
+        return 6
+
+    @property
     def a_face(self):
         """Square face side length."""
         return 2.0 * self.r_face * np.tan(np.pi / self.n_gon)
+
+    @property
+    def winding(self):
+        return wind(self.d_mag / 2.0, self.l_mag, self.wire_d, self.n_layers)
 
     @property
     def bounding_cube(self):
@@ -141,6 +136,13 @@ class Design:
 # Stage 1: magnetics
 # --------------------------------------------------------------------------
 def _regions(dsg, flip):
+    """Axisymmetric regions for one mated pair.
+
+    The steel annulus starts OUTSIDE the winding, not at the magnet surface.
+    The coil occupies real radial space - four to eight layers of 0.25 mm wire
+    is one to two millimetres of it - and putting the iron where the copper
+    actually is overstated the return path.
+    """
     Rm, Lm, gap = dsg.d_mag / 2, dsg.l_mag, dsg.gap
     mat = material(dsg.material)
     d = -1 if flip else +1
@@ -149,14 +151,23 @@ def _regions(dsg, flip):
         Region(0, Rm, gap, gap + Lm, "magnet", "B", material=mat, direction=d),
     ]
     if dsg.circuit == "potcore":
-        ro = Rm + dsg.r_clear + dsg.t_steel
+        ri = Rm + dsg.winding.build + dsg.r_clear
+        ro = ri + dsg.t_steel
         regs += [
             Region(0, ro, -Lm - dsg.t_steel, -Lm, "steel", "backA"),
-            Region(Rm + dsg.r_clear, ro, -Lm, 0.0, "steel", "annA"),
+            Region(ri, ro, -Lm, 0.0, "steel", "annA"),
             Region(0, ro, gap + Lm, gap + Lm + dsg.t_steel, "steel", "backB"),
-            Region(Rm + dsg.r_clear, ro, gap, gap + Lm, "steel", "annB"),
+            Region(ri, ro, gap, gap + Lm, "steel", "annB"),
         ]
     return regs
+
+
+def epm_outer_radius(dsg):
+    """Outer radius of the whole EPM assembly on a face."""
+    r = dsg.d_mag / 2 + dsg.winding.build
+    if dsg.circuit == "potcore":
+        r += dsg.r_clear + dsg.t_steel
+    return r
 
 
 def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal",
@@ -178,8 +189,9 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal",
     solving the attracting state as well would double its cost for no use.
     """
     Rm = dsg.d_mag / 2
-    ro = Rm + (dsg.r_clear + dsg.t_steel if dsg.circuit == "potcore" else 0.0)
+    ro = epm_outer_radius(dsg)
     hcj = MATERIALS[dsg.material]["Hcj"]
+    mu_rec = MATERIALS[dsg.material]["mu_rec"]
 
     if fidelity == "screen":
         ns, rfar_k, zfar_k, nq = 3, 12, 10, 1500
@@ -216,10 +228,18 @@ def stage1_magnetics(dsg, mesh=None, n_slabs=None, fidelity="normal",
         out[f"J_{tag}"] = J
         out[f"margin_{tag}"] = abs(H) / hcj
         out[f"F_{tag}"] = abs(F)
+        # The effective demagnetising factor of the circuit this magnet is
+        # actually sitting in, read straight out of the solved state.  This is
+        # what the switching stage needs and could not previously get: it
+        # already contains the steel, the working gap, the neighbour and the
+        # magnet's own recoil permeability, so the driver is designed against
+        # the real magnetic circuit instead of an air-cored guess.
+        out[f"n_eff_{tag}"] = n_eff_from_fem(J, H, mu_rec)
 
     if len(states) == 2:
         out["asymmetry"] = out["F_attract"] / max(out["F_repel"], 1e-9)
         out["margin"] = max(out["margin_attract"], out["margin_repel"])
+        out["n_eff"] = out["n_eff_attract"]
     return out
 
 
@@ -297,8 +317,13 @@ def pivot_work(dsg, mag, n_theta=80, fidelity="screen", probe_gaps=(1e-3, 4e-3))
     return dict(W_drive=max(W, 0.0), W_trail=W)
 
 
-def stage2_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
+def stage3_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
     """Static feasibility of latching, hanging and pivoting.
+
+    Runs LAST, and only when switching has already succeeded.  A module whose
+    coil cannot reverse its magnet is not a robot however well it holds, so
+    there is nothing to learn from its gait - and this is the expensive stage,
+    so skipping it is where most of the search time is saved.
 
     Pivot model.  A module rolls onto its neighbour by rotating about the
     shared edge through the exterior angle 360/n.  Two quantities decide
@@ -313,8 +338,7 @@ def stage2_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
       function multiplied peak force by arc length and overstated the drive by
       about fifty times.
 
-    Also checks the module can hold its own weight hanging from one face, and
-    that a horizontal chain of modules does not tear at the root.
+    Also checks the module can hold its own weight hanging from one face.
     """
     from module import build_module
 
@@ -327,7 +351,6 @@ def stage2_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
     r = dsg.r_face
     R_vertex = r / np.cos(np.pi / n)
 
-    # energy barrier to roll over the edge
     dE = m * G * (R_vertex - r)
 
     pw = pivot_work(dsg, mag, fidelity=fidelity)
@@ -343,63 +366,111 @@ def stage2_mechanics(dsg, mag, mod=None, driver=None, fidelity="screen"):
                 fits=mod.fits, module=mod)
 
 
+# older scripts import the previous name
+def stage2_mechanics(dsg, mag, **kw):
+    return stage3_mechanics(dsg, mag, **kw)
+
+
 # --------------------------------------------------------------------------
-# Stage 3: switching
+# Stage 2: switching
 # --------------------------------------------------------------------------
-def stage3_switching(dsg, k_switch=3.0, winding_build=None, v_max=200.0):
+def stage2_switching(dsg, k_switch=3.0, v_max=400.0, n_eff=None,
+                     search_pulse=False, r_series=0.05, n_steps=2500):
     """Can the coil reverse the magnet, and what does it cost?
 
-    Peak current is taken from the underdamped LC limit, which the feasibility
-    audit showed is the operative regime for a practical coil: the 0.1 mm
-    winding failed because it was overdamped, not because it lacked turns.
+    Everything here is built on Stage 1.  ``n_eff`` is the effective
+    demagnetising factor MEASURED from the field solve, so the inductance and
+    the field driven per ampere are those of the real magnetic circuit -
+    including the steel return path, the magnet's own recoil permeability and
+    a latched neighbour.  Falling back to the analytic estimate is only for the
+    pre-screen, where no field solve has been paid for yet.
 
-    Two different energies are reported and they must not be confused.
-    ``e_bank`` is whatever the specified capacitor happens to store, which says
-    nothing about the design - it is the same for every material at a given
-    driver.  ``e_required`` is the bank energy actually needed to reach the
-    switching threshold for THIS material and geometry, obtained by scaling the
-    drive voltage until the ampere-turns just suffice.  That is the quantity
-    that belongs in an objective, because it is what a high-coercivity grade
-    really costs.
+    What changed from the previous version, and why it matters:
+
+    * The winding is a real multi-layer coil, so turns and resistance come
+      from ``coil.wind`` rather than from a smooth product that could not tell
+      one layer from eight.
+    * The drive is integrated in time rather than reduced to an underdamped LC
+      peak, so a PULSE TRAIN can be evaluated.  A train at the right frequency
+      and duty reaches the same field for substantially less energy out of the
+      bank, because the bank is not dumped into resistance on a single swing.
+    * The threshold is a field in the magnet, not ampere-turns in free space.
+
+    Two energies are reported and must not be confused.  ``e_bank`` is whatever
+    the specified capacitor happens to store.  ``e_required`` is the bank
+    energy actually needed to reach the switching threshold for THIS material
+    and geometry, obtained by scaling the drive voltage until the field just
+    suffices.  That is the quantity that belongs in an objective.
     """
-    d = dsg.wire_d
-    build = winding_build or dsg.t_steel
-    n_turns = (dsg.l_mag / d) * (build / d)
-    mean_d = dsg.d_mag + build
-    wire_len = n_turns * np.pi * mean_d
-    area = np.pi * (d / 2) ** 2
-    R = RHO_CU * wire_len / area
-    L = MU0 * n_turns**2 * (np.pi * (mean_d / 2) ** 2) / (dsg.l_mag +
-                                                          0.45 * mean_d)
+    from circuit_sim import PulseProgram, best_program, simulate
 
-    z0 = np.sqrt(L / dsg.c_cap)
-    underdamped = R < 2 * z0
-    # resistance always bounds the peak current, even for a very low
-    # inductance coil where the LC impedance alone would predict a huge one
-    i_peak = min(dsg.v_cap / z0 if z0 > 0 else np.inf,
-                 dsg.v_cap / max(R, 1e-6))
-    mmf = n_turns * i_peak
-
+    w = dsg.winding
     hcj = MATERIALS[dsg.material]["Hcj"]
-    mmf_need = k_switch * hcj * dsg.l_mag
+    mu_rec = MATERIALS[dsg.material]["mu_rec"]
+    h_need = k_switch * hcj
 
-    # voltage that would just reach the threshold (peak current is linear in V
-    # in both damping regimes, so this scales directly)
-    v_need = dsg.v_cap * mmf_need / max(mmf, 1e-12)
-    e_required = 0.5 * dsg.c_cap * v_need**2
+    if n_eff is None:
+        n_eff = estimate_n_eff(dsg.d_mag, dsg.l_mag, mu_rec,
+                               t_steel=dsg.t_steel,
+                               r_clear=dsg.winding.build + dsg.r_clear,
+                               gap=dsg.gap,
+                               has_steel=dsg.circuit == "potcore",
+                               has_neighbour=True)
+    circ = mag_circuit(dsg.d_mag, dsg.l_mag, mu_rec, t_steel=dsg.t_steel,
+                       r_clear=dsg.winding.build + dsg.r_clear, gap=dsg.gap,
+                       has_steel=dsg.circuit == "potcore",
+                       has_neighbour=True, n_eff=n_eff, source="fem")
+
+    prog = PulseProgram(dsg.pulse_mode, f_pulse=dsg.f_pulse, duty=dsg.duty,
+                        n_pulses=dsg.n_pulses)
+    tr = simulate(circ, w.n_turns, w.resistance, dsg.c_cap, dsg.v_cap,
+                  r_series=r_series, h_need=h_need, program=prog,
+                  n_steps=n_steps)
+
+    # voltage that would just reach the threshold.  Peak field is linear in
+    # the drive voltage in both damping regimes while the iron is unsaturated,
+    # so this scales directly; once the iron saturates it is optimistic, which
+    # is why the saturation flag is carried through to the constraint set.
+    v_need = dsg.v_cap * h_need / max(tr.h_peak, 1e-9)
+    e_required = 0.5 * dsg.c_cap * v_need ** 2
+
+    best = tr
+    if search_pulse and tr.switched:
+        _, best = best_program(circ, w.n_turns, w.resistance, dsg.c_cap,
+                               dsg.v_cap, h_need, r_series=r_series)
 
     v_mag = np.pi * (dsg.d_mag / 2) ** 2 * dsg.l_mag
     e_hyst = 4.0 * MATERIALS[dsg.material]["Br"] * hcj * v_mag
 
-    return dict(n_turns=n_turns, R_coil=R, L_coil=L, i_peak=i_peak,
-                underdamped=underdamped,
-                mmf=mmf, mmf_need=mmf_need,
-                switch_ok=v_need <= v_max,
-                v_need=v_need, switch_margin=mmf / mmf_need,
+    return dict(n_turns=w.n_turns, n_layers=w.n_layers,
+                turns_per_layer=w.turns_per_layer,
+                winding_build=w.build, wire_length=w.wire_length,
+                coil_mass=w.mass, fill_factor=w.fill_factor,
+                R_coil=w.resistance, L_coil=circ.inductance(w.n_turns),
+                n_eff=circ.n_eff, n_eff_source=circ.source,
+                i_peak=tr.i_peak, h_peak=tr.h_peak, h_need=h_need,
+                mmf=tr.mmf_peak, mmf_need=circ.mmf_for_h(h_need),
+                switch_ok=bool(tr.switched and v_need <= v_max),
+                switched=bool(tr.switched),
+                saturated=bool(tr.saturated),
+                b_steel_peak=tr.b_steel_peak,
+                v_need=v_need, switch_margin=tr.h_peak / max(h_need, 1e-9),
                 e_hysteresis=e_hyst,
-                e_bank=0.5 * dsg.c_cap * dsg.v_cap**2,
+                e_bank=0.5 * dsg.c_cap * dsg.v_cap ** 2,
+                e_drawn=tr.e_drawn, e_resistive=tr.e_resistive,
                 e_required=e_required,
-                e_total_module=e_required * dsg.n_faces)
+                e_total_module=e_required * dsg.n_faces,
+                t_peak=tr.t_peak,
+                pulse_program=best.meta.get("program", "single shot"),
+                e_drawn_best=best.e_drawn,
+                pulse_saving=(1.0 - best.e_drawn / max(tr.e_drawn, 1e-12))
+                if tr.e_drawn > 0 else 0.0,
+                transient=tr)
+
+
+# backwards-compatible alias: several older scripts import this name
+def stage3_switching(dsg, **kw):
+    return stage2_switching(dsg, **kw)
 
 
 # --------------------------------------------------------------------------
@@ -419,18 +490,23 @@ def score(dsg, mag=None, mech=None, sw=None, drv=None):
     provided for single-objective methods.
     """
     mag = mag if mag is not None else stage1_magnetics(dsg)
-    sw = sw if sw is not None else stage3_switching(dsg)
+    sw = sw if sw is not None else stage2_switching(dsg,
+                                                    n_eff=mag.get("n_eff"))
     if drv is None:
         from driver import select_driver
         drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
                             sw["n_turns"], sw["mmf_need"],
                             n_faces=dsg.n_faces)
-    mech = mech if mech is not None else stage2_mechanics(
+    mech = mech if mech is not None else stage3_mechanics(
         dsg, mag, driver=drv if drv.feasible else None)
 
     violations = []
     if mag["margin"] > MARGIN_LIMIT:
         violations.append(f"demag margin {mag['margin']:.2f} > {MARGIN_LIMIT}")
+    if not sw["switched"]:
+        violations.append(
+            f"coil reaches only {sw['h_peak']/1e3:.0f} kA/m of the "
+            f"{sw['h_need']/1e3:.0f} kA/m needed to switch")
     if not drv.feasible:
         violations.append(f"no driver for {sw['v_need']:.0f} V")
     if mech["hold_ratio"] < HOLD_MIN:
@@ -490,15 +566,18 @@ def prescreen(dsg, sw=None, drv=None):
     depth = dsg.l_mag + (dsg.t_steel if dsg.circuit == "potcore" else 0.0)
     if depth > 0.85 * dsg.r_face:
         reasons.append("EPM deeper than the module radius")
-    r_out = dsg.d_mag / 2 + (dsg.r_clear + dsg.t_steel
-                             if dsg.circuit == "potcore" else 0.0)
+    r_out = epm_outer_radius(dsg)
     if 2 * r_out > 0.95 * dsg.a_face:
         reasons.append("EPM wider than the face")
     if dsg.bounding_cube > CUBE_MAX:
         reasons.append(f"cube {dsg.bounding_cube*1e3:.0f} mm > 50 mm")
 
     if sw is None:
-        sw = stage3_switching(dsg)
+        sw = stage2_switching(dsg, search_pulse=False)
+    if not sw["switched"]:
+        reasons.append(
+            f"coil reaches only {sw['h_peak']/1e3:.0f} kA/m of the "
+            f"{sw['h_need']/1e3:.0f} kA/m needed to switch")
     if drv is None:
         from driver import select_driver
         drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
@@ -531,24 +610,29 @@ def prescreen(dsg, sw=None, drv=None):
 ROW_FIELDS = (
     # design
     "material", "d_mag", "l_mag", "circuit", "t_steel", "r_clear", "gap",
-    "n_gon", "r_face", "wire_d", "v_cap", "c_cap", "fidelity",
-    # derived geometry
-    "n_faces", "a_face", "bounding_cube",
-    # stage 1
+    "n_gon", "r_face", "wire_d", "n_layers", "v_cap", "c_cap",
+    "pulse_mode", "f_pulse", "duty", "n_pulses", "fidelity",
+    # stage 0: the module
+    "n_faces", "a_face", "bounding_cube", "m_module", "free_volume",
+    "coil_mass", "turns_per_layer", "n_turns", "winding_build",
+    # stage 1: magnetics
     "J_attract", "J_repel", "margin_attract", "margin_repel",
-    "F_attract", "F_repel", "asymmetry", "margin",
-    # stage 2
-    "m_module", "hold_ratio", "pivot_ratio", "E_barrier", "W_drive",
-    # stage 3
-    "mmf", "mmf_need", "v_need", "e_switch",
+    "F_attract", "F_repel", "asymmetry", "margin", "n_eff",
+    # stage 2: switching
+    "R_coil", "L_coil", "i_peak", "h_peak", "h_need", "switch_margin",
+    "switched", "saturated", "b_steel_peak", "mmf", "mmf_need", "v_need",
+    "e_switch", "e_drawn", "pulse_program", "pulse_saving",
+    # stage 3: mechanics
+    "hold_ratio", "pivot_ratio", "E_barrier", "W_drive",
     # driver
-    "drv_mass", "drv_price", "drv_cap", "drv_mosfet",
+    "drv_mass", "drv_price", "drv_cap", "drv_mosfet", "drv_topology",
     # scoring
     "feasible", "scalar", "violations",
 )
 
 
-def _row(dsg, fidelity, mag, mech, sw, drv, feasible, scalar, violations):
+def _row(dsg, fidelity, mag, mech, sw, drv, feasible, scalar, violations,
+         mod=None):
     """Build a result row in a fixed column order.
 
     The order must not depend on which code path produced the row: a
@@ -557,43 +641,65 @@ def _row(dsg, fidelity, mag, mech, sw, drv, feasible, scalar, violations):
     src = dict(dsg.as_row())
     src.update(fidelity=fidelity, n_faces=dsg.n_faces, a_face=dsg.a_face,
                bounding_cube=dsg.bounding_cube)
+    if mod is not None:
+        src.update(free_volume=mod.free_volume)
     src.update(mag)
     src.update(m_module=mech.get("m_module"),
                hold_ratio=mech.get("hold_ratio"),
                pivot_ratio=mech.get("pivot_ratio"),
                E_barrier=mech.get("E_barrier"), W_drive=mech.get("W_drive"))
-    src.update(mmf=sw["mmf"], mmf_need=sw["mmf_need"], v_need=sw["v_need"],
-               e_switch=sw["e_required"] * dsg.n_faces)
+    for k in ("R_coil", "L_coil", "i_peak", "h_peak", "h_need",
+              "switch_margin", "switched", "saturated", "b_steel_peak",
+              "mmf", "mmf_need", "v_need", "e_drawn", "pulse_program",
+              "pulse_saving", "coil_mass", "turns_per_layer", "n_turns",
+              "winding_build"):
+        src[k] = sw.get(k)
+    src["e_switch"] = sw["e_required"] * dsg.n_faces
     src.update(drv_mass=(drv.mass if drv and drv.feasible else None),
                drv_price=(drv.price if drv and drv.feasible else None),
                drv_cap=(drv.cap_name if drv and drv.feasible else None),
-               drv_mosfet=(drv.mosfet_name if drv and drv.feasible else None))
+               drv_mosfet=(drv.mosfet_name if drv and drv.feasible else None),
+               drv_topology=(drv.topology if drv and drv.feasible else None))
     src.update(feasible=feasible, scalar=scalar, violations=violations)
     return {k: src.get(k) for k in ROW_FIELDS}
 
 
+_BLANK_MAG = dict(J_attract=np.nan, J_repel=np.nan, margin_attract=np.nan,
+                  margin_repel=np.nan, F_attract=0.0, F_repel=0.0,
+                  asymmetry=np.inf, margin=np.nan, n_eff=np.nan)
+
+
 def evaluate(dsg, fidelity="normal", use_prescreen=True):
-    """Run every stage and score.  Returns a flat dict for tabulation."""
+    """Run every stage in order and score.  Returns a flat dict.
+
+    The order is the point.  Stage 0 builds the module, Stage 1 solves its
+    field and measures the magnetic circuit, Stage 2 drives that circuit, and
+    Stage 3 only runs if Stage 2 actually switched.  Roughly two thirds of a
+    random population fails before mechanics, and mechanics is four fifths of
+    the cost, so the gate is most of the run time.
+    """
     from driver import select_driver
     from module import build_module
 
-    sw = stage3_switching(dsg)
+    # ---- Stage 0: the module.  Built first because everything measures
+    # itself against this geometry - including the winding, whose radial build
+    # sets where the steel starts and therefore what Stage 1 solves.
+    mod0 = build_module(dsg)
+
+    # cheap switching pass for the pre-screen, on the estimated circuit
+    sw = stage2_switching(dsg, search_pulse=False)
     drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
                         sw["n_turns"], sw["mmf_need"], n_faces=dsg.n_faces)
 
     if use_prescreen:
         ok, why = prescreen(dsg, sw, drv)
         if not ok:
-            blank = dict(J_attract=np.nan, J_repel=np.nan,
-                         margin_attract=np.nan, margin_repel=np.nan,
-                         F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
-                         margin=np.nan)
-            mod = build_module(dsg, drv if drv.feasible else None)
-            mech = dict(m_module=mod.mass, hold_ratio=0.0, pivot_ratio=0.0,
-                        E_barrier=np.nan, W_drive=0.0, fits=mod.fits)
-            return _row(dsg, fidelity, blank, mech, sw, drv, False, 0.0,
-                        "; ".join(why) + " [prescreen]")
+            mech = dict(m_module=mod0.mass, hold_ratio=0.0, pivot_ratio=0.0,
+                        E_barrier=np.nan, W_drive=0.0, fits=mod0.fits)
+            return _row(dsg, fidelity, dict(_BLANK_MAG), mech, sw, drv,
+                        False, 0.0, "; ".join(why) + " [prescreen]", mod0)
 
+    # ---- Stage 1: magnetics
     try:
         mag = stage1_magnetics(dsg, fidelity=fidelity)
     except RuntimeError as exc:
@@ -602,20 +708,35 @@ def evaluate(dsg, fidelity="normal", use_prescreen=True):
         # demagnetisation curve, which is precisely the operating point the
         # margin constraint exists to forbid.  Record it as infeasible rather
         # than letting it abort the sweep.
-        blank = dict(J_attract=np.nan, J_repel=np.nan,
-                     margin_attract=np.nan, margin_repel=np.nan,
-                     F_attract=0.0, F_repel=0.0, asymmetry=np.inf,
-                     margin=1.0)
-        mod = build_module(dsg, drv if drv.feasible else None)
-        mech = dict(m_module=mod.mass, hold_ratio=0.0, pivot_ratio=0.0,
-                    E_barrier=np.nan, W_drive=0.0, fits=mod.fits)
+        blank = dict(_BLANK_MAG, margin=1.0)
+        mech = dict(m_module=mod0.mass, hold_ratio=0.0, pivot_ratio=0.0,
+                    E_barrier=np.nan, W_drive=0.0, fits=mod0.fits)
         return _row(dsg, fidelity, blank, mech, sw, drv, False, 0.0,
-                    f"magnet solve stalled on the knee ({exc})")
+                    f"magnet solve stalled on the knee ({exc})", mod0)
 
-    mod = build_module(dsg, drv if drv.feasible else None)
-    mech = stage2_mechanics(dsg, mag, mod=mod)
+    # ---- Stage 2: switching, now on the circuit the FEM measured
+    sw = stage2_switching(dsg, n_eff=mag.get("n_eff"))
+    drv = select_driver(sw["v_need"], sw["L_coil"], sw["R_coil"],
+                        sw["n_turns"], sw["mmf_need"], n_faces=dsg.n_faces)
+
+    if not sw["switched"] or not drv.feasible:
+        why = []
+        if not sw["switched"]:
+            why.append(f"coil reaches only {sw['h_peak']/1e3:.0f} kA/m of "
+                       f"the {sw['h_need']/1e3:.0f} kA/m needed to switch")
+        if not drv.feasible:
+            why.append(f"no driver for {sw['v_need']:.0f} V")
+        mech = dict(m_module=mod0.mass, hold_ratio=0.0, pivot_ratio=0.0,
+                    E_barrier=np.nan, W_drive=0.0, fits=mod0.fits)
+        return _row(dsg, fidelity, mag, mech, sw, drv, False, 0.0,
+                    "; ".join(why) + " [no mechanics: switching failed]",
+                    mod0)
+
+    # ---- Stage 3: mechanics, only now that the thing can actually switch
+    mod = build_module(dsg, drv)
+    mech = stage3_mechanics(dsg, mag, mod=mod)
     sc = score(dsg, mag, mech, sw, drv)
     return _row(dsg, fidelity, mag, mech, sw, drv, sc["feasible"],
-                sc["scalar"], "; ".join(sc["violations"]))
+                sc["scalar"], "; ".join(sc["violations"]), mod)
 
 

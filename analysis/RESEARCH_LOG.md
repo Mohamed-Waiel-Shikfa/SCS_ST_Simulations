@@ -434,3 +434,217 @@ nothing at all - 0.0 degrees in every case.  At n = 8 that pair starts 11 mm
 apart, and the force there is three orders below the contact force.  **Pivoting
 must be driven by repulsion from the face the module is already standing on.**
 There is no reach-ahead mode.
+
+
+---
+
+# Second pass: the pipeline rebuilt so each stage feeds the next
+
+The first pass established the physics one stage at a time.  This pass fixed
+the joins between them.  Almost every finding below is about something a stage
+was ASSUMING because it could not see what the stage before it had computed.
+
+## The material space was pre-judged
+
+The table held Alnico and little else, so the central trade - coercivity buys
+repulsion and costs switching energy - could only be explored over a threefold
+range of Hcj.  It now spans fifty: 29 grades in seven families, everything
+commercially available below 2000 kA/m, from Cunife and Vicalloy at 38 kA/m
+through the Alnicos, Mn-Al-C and the ferrites to SmCo at the ceiling.
+
+Density is now per-material and it matters more than expected.  Ferrite is
+4900 kg/m^3 against Alnico's 7300 and SmCo's 8400, and magnet mass is a large
+share of module mass, so the lighter grades get a mass credit that partly
+offsets their weaker remanence.
+
+The rare-earth rows are deliberately hopeless and are kept for that reason.
+Sm2Co17-30 needs about thirty times the ampere-turns of Alnico in the same
+geometry; leaving it in lets the optimiser demonstrate where the wall is
+instead of the wall being asserted.
+
+## The winding was not a real object
+
+Turns came out as `(l_mag / d) * (build / d)` with `build` defaulting to the
+KEEPER WALL THICKNESS.  Two things were wrong with that.  The winding depth
+was welded to a structural dimension that has no reason to equal it, so the
+search could not trade one against the other.  And nothing distinguished one
+layer from many: turns was a smooth product, so the model never saw that each
+new layer sits at a larger radius and therefore costs more copper per turn.
+
+With the layers made explicit, **turns per ohm falls steadily with winding
+depth** - 205 for one layer, 127 for twelve, on a 4.2 mm magnet.  A lumped
+model misses this entirely and over-rewards deep coils.
+
+The winding also occupies radial space, which it previously did not.  That
+space comes out of the magnet or the keeper, and the steel annulus now starts
+outside the copper rather than at the magnet surface.
+
+## One number carries the whole magnetic circuit
+
+The switching stage used to compute an air-cored solenoid inductance.  A real
+EPM coil is wound on a magnet of recoil permeability 1.04 to 4.0, inside a
+steel return path, next to a neighbour that is also a magnet.
+
+All of that enters through a single quantity: the effective demagnetising
+factor `n_eff` of the circuit the magnet actually sits in.  With
+`n_eff = R_ext / (R_mag + R_ext)`,
+
+    H_self  = -n_eff J / (mu0 mu_rec)          the operating point
+    F_coil  =  H L / (1 - n_eff)               ampere-turns for a target H
+    L_coil  =  N^2 (1 - n_eff) / R_mag
+
+and the useful part is that **n_eff is measurable from the Stage 1 field solve
+at no extra cost**: the solved state already reports the volume-averaged J and
+H in the magnet, so `n_eff = -mu0 mu_rec H / J`.  The driver is now designed
+against the circuit the FEM computed rather than a guessed fringing permeance.
+
+For a bare rod this reduces to `n_eff = mu_rec * N_d`.  That factor of mu_rec
+is the reason a high recoil permeability is not free: Alnico 5 with mu_rec = 4
+sits four times further down its own load line than a ferrite of identical
+shape.  The material changes the electromagnet's job as well as the threshold
+it has to clear.
+
+### The neighbour helps, but less than it first appeared
+
+An early version modelled a latched neighbour as REPLACING the local return
+path, which made switching while latched look much cheaper.  That is wrong:
+the neighbour is a SECOND path in PARALLEL with the local fringe path, so it
+can only lower n_eff, and it lowers it modestly - from 0.266 to 0.214 in a
+representative pot core - because the neighbour's own magnet is a long
+low-permeability leg.  Getting this backwards would have sized the driver
+against a circuit that does not exist.
+
+## Pulse trains
+
+The drive was always a single capacitor discharge: close the switch, take the
+first peak.  Integrating the loop in time instead allows a train, and a train
+at the right frequency and duty **reaches the same switching field for about
+80 % less energy out of the bank**, because the bank is not dumped into
+resistance on one swing.  Pulse frequency, duty and count are now genome
+variables rather than assumptions.
+
+One bug worth recording: with no floor on the coil inductance, a degenerate
+design drove the RK4 step past the range of a double and filled the trace with
+NaN.  Because a NaN peak field compares false against the threshold, those
+designs were silently marked unable to switch rather than raising anything -
+a whole corner of the search space quietly removed.  Both a floor and an
+explicit divergence flag are now in place.
+
+## Three dimensions, and what it cost to trust them
+
+The axisymmetric FEM can only see two EPMs on a shared axis.  A pivot is not
+that: the driving pair rotates away from coaxial while a second pair swings
+towards it, and there is no axis of revolution anywhere in the geometry.
+
+`fem3d.py` is a magnetostatic method of moments on the magnetised bodies
+alone - cells of uniform magnetisation whose field is available in closed
+form, so there is no mesh in the air at all.  Verifying it found four bugs,
+every one of which produced numbers that looked entirely plausible:
+
+1. The kernel's Hz term used `atan2` rather than the principal branch.  The
+   corner sum cancels the resulting jumps of pi only OUTSIDE the rectangle's
+   shadow, so the error was invisible in the far field and gave a cube a
+   self-demagnetising factor of -2/3 instead of 1/3.
+2. The magnet's irreversible-loss history latched onto the first iterate's
+   overshoot from the Br starting guess, permanently demagnetising the magnet
+   with a field that was never a physical operating point.  It converged to
+   J = 0.45 T where the validated one-dimensional solver gives 0.62 T.
+3. An angled pair was rotated about the pole-face CENTRES rather than the
+   shared rim, so beyond `asin(gap / r_pole)` - about three degrees - the two
+   magnets interpenetrated.  Every angled result before this was meaningless,
+   and the symptom was scatter by a factor of eight between discretisations
+   rather than anything that looked like an error.
+4. Square tiles of a circular pole reach 25 % past the magnet radius, so with
+   a 0.5 mm clearance the outer tiles ran into the steel annulus - 50 to 96
+   overlapping cell pairs.  Polar dicing fixed it, and an explicit
+   separating-axis overlap check now guards every scene.
+
+Simple iteration also had to be replaced by a damped Newton step with
+continuation.  Soft iron has a susceptibility around 2000, so the fixed point
+has a gain far above one and diverges; with a pot core the plain iteration was
+still at a residual of 1.1 after two thousand passes while reporting plausible
+numbers.  Continuation is needed on top, because two like poles a tenth of a
+millimetre apart drive each other past the knee and the iteration flips
+between fully magnetised and fully demagnetised.
+
+### An open discrepancy, not resolved
+
+After all of that: **for magnets with no return path the 3-D solver is
+verified** - 2 % on the operating point against the validated 1-D solver,
+2-5 % on force against the axisymmetric FEM, converging under refinement and
+stable to about 2 % across discretisations at every angle.
+
+**With a steel pot core the two solvers disagree.**  The magnet operating
+point still agrees to 1.3 %, but the force does not: the 3-D solver reads
+about 20 % high on attraction and three times high on repulsion.  Forcing both
+to use linear iron changes nothing, so it is not saturation.  Since J agrees
+and F does not, the two models are splitting the flux differently between the
+pole face and the annulus rim - and the repelling force is a small difference
+between a large pole-to-pole repulsion and a large pole-to-rim attraction, so
+a modest error in that split becomes a large error in the total.
+
+Neither model is validated against measurement for the pot-core geometry: the
+experimental data in this repository is for bare rods.  This is therefore
+recorded as an open discrepancy rather than averaged away.  The pipeline takes
+all magnitudes from the axisymmetric solver and uses the 3-D solver only for
+the angular dependence, computed magnets-only, and for the volumetric field
+shown in the viewer.
+
+## Faces, and which ones are allowed to do what
+
+Exactly six of the `3n - 6` faces may LATCH: the ones on the coordinate axes,
+shared by two of the three rings.  Two modules joined axis-face to axis-face
+have parallel frames and the assembly stays on a cubic lattice; a joint on any
+other face would fix two modules at an oblique angle and the lattice would
+never close again.  This holds for every n - eight faces or forty-two, always
+six latching.  The other faces are what the module ROLLS on.
+
+A subtle error here: the face on the neighbour that mates with face `n` is the
+REFLECTION of `n` through the joint plane, `n - 2 (n . a) a`, not `-n`.  For
+the mating faces themselves the two coincide, which is why it stayed hidden;
+it only shows on the neighbouring pairs, where taking `-n` picks a face on the
+far side of the module that never comes near anything.
+
+## Rolling: gravity does not treat the cases alike
+
+Four configurations are now simulated - one horizontal, and three vertical
+(from the bottom, from the side, from the top) - and three drive schemes are
+run rather than one being assumed.  The result for the current design:
+
+* **push off** (the specified scheme: reverse the face-to-face pair AND the
+  trailing neighbour) rotates the module - 44 of 45 degrees in 183 ms on the
+  ground - but RELEASES it.  On a floor the ground catches it.  On a wall
+  nothing does, and it falls.
+* **trailing only** (keep the mating pair attracting) holds in every
+  configuration but does not rotate at all: 0.1 degrees.  The latch is far too
+  strong to pivot against.
+* **reach** behaves like push off.
+
+So for this design no scheme both rotates and stays attached, and wall
+climbing does not work even though the static pivot bound is nearly met.  That
+is a real result about the actuation scheme rather than a limitation of the
+simulation, and it is the reason all three are run.
+
+One modelling point that took a while: the working air gap is a MAGNETIC
+quantity, the distance between pole faces.  Separating the two shells by it as
+well removed the mechanical contact and with it the friction, and since the
+magnetic pull between two side-by-side modules acts along the horizontal
+joint, there was then nothing at all resisting gravity.  Every wall case fell
+2.7 metres for a reason that had nothing to do with magnetics.
+
+## The gate that pays for everything else
+
+The stages now run module, magnetics, switching, mechanics, and **mechanics is
+skipped entirely when switching fails**.  A module whose coil cannot reverse
+its magnet is not a robot however well it holds, so simulating its gait is
+wasted time - and mechanics is the expensive stage.  In a random population
+roughly two thirds of designs never reach it.
+
+## What the more accurate model says about the previous winner
+
+The revised pipeline is harsher, and it should be: the winding now has mass
+and takes radial space, the steel starts outside the copper, and densities are
+per-material.  The design that was previously reported as the winner now comes
+out at a pivot ratio of 1.46 against the required 1.5 - marginal rather than
+feasible.  The binding constraints across the search are the pivot bound and
+the electronics packing, in that order.
