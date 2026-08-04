@@ -54,6 +54,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from framework import (MATERIALS, Design, evaluate)  # noqa: E402
+from materials import ALL_NAMES  # noqa: E402
 
 VENDOR = [k for k, v in MATERIALS.items() if v["src"] == "vendor"]
 
@@ -68,19 +69,27 @@ VENDOR = [k for k, v in MATERIALS.items() if v["src"] == "vendor"]
 #
 # name, kind, low, high  (kind: "real", "cat")
 GENOME = [
-    ("material", "cat", VENDOR),
+    ("material", "cat", ALL_NAMES),
     ("circuit", "cat", ["none", "potcore"]),
     ("n_gon", "cat", [8, 12, 16, 20]),
+    ("pulse_mode", "cat", ["single", "train"]),
     ("r_face", "real", 8e-3, 24e-3),
     ("d_frac", "real", 0.35, 1.00),     # EPM outer dia / available face width
     ("l_frac", "real", 0.15, 0.80),     # EPM depth / module radius
     ("f_clear", "real", 0.05, 0.35),    # share of EPM radius given to clearance
     ("f_steel", "real", 0.10, 0.45),    # share of EPM radius given to keeper
     ("gap", "real", 0.05e-3, 0.4e-3),
-    ("wire_d", "real", 0.15e-3, 0.6e-3),
-    ("v_cap", "real", 20.0, 200.0),
+    ("wire_d", "real", 0.10e-3, 0.6e-3),
+    ("n_layers", "int", 1, 16),         # a real winding variable at last
+    ("v_cap", "real", 20.0, 300.0),
     ("c_cap", "real", 4.7e-6, 220e-6),
+    ("f_pulse", "real", 2e3, 120e3),    # pulse-train frequency
+    ("duty", "real", 0.10, 0.90),       # pulse-train duty cycle
+    ("n_pulses", "int", 1, 12),
 ]
+
+CONTINUOUS = [s[0] for s in GENOME if s[1] in ("real", "int")]
+BOUNDS = {s[0]: (s[2], s[3]) for s in GENOME if s[1] in ("real", "int")}
 
 # objective name -> +1 maximise, -1 minimise
 OBJECTIVES = {"f_attract": +1, "f_repel": +1, "asymmetry": -1,
@@ -98,6 +107,8 @@ def random_genome(rng):
         name, kind = spec[0], spec[1]
         if kind == "cat":
             g[name] = spec[2][rng.integers(len(spec[2]))]
+        elif kind == "int":
+            g[name] = int(rng.integers(spec[2], spec[3] + 1))
         else:
             g[name] = float(rng.uniform(spec[2], spec[3]))
     return g
@@ -106,12 +117,16 @@ def random_genome(rng):
 def to_design(g):
     """Decode a genome into a Design, resolving fractions into dimensions.
 
-    The radial budget on a face is shared between the magnet, the clearance and
-    the keeper wall.  Allocating it by FRACTIONS rather than subtracting
-    absolute thicknesses matters: with absolute values the clearance and keeper
-    can consume the entire budget on a small face and leave a sub-millimetre
-    magnet inside a heavy steel cup - which the search then wastes evaluations
-    on.  Proportional allocation keeps every decoded design sensible.
+    The radial budget on a face is shared between the magnet, the winding, the
+    clearance and the keeper wall.  Allocating it by FRACTIONS rather than
+    subtracting absolute thicknesses matters: with absolute values the
+    clearance and keeper can consume the entire budget on a small face and
+    leave a sub-millimetre magnet inside a heavy steel cup - which the search
+    then wastes evaluations on.  Proportional allocation keeps every decoded
+    design sensible.
+
+    The winding is now part of that budget rather than free.  A deep coil eats
+    the radius it needs from somewhere, and previously it ate it from nowhere.
     """
     n = int(g["n_gon"])
     r_face = g["r_face"]
@@ -120,18 +135,22 @@ def to_design(g):
     # total radius available to the whole EPM assembly on one face
     r_out = 0.5 * 0.92 * a_face * g["d_frac"]
 
+    n_layers = int(round(g["n_layers"]))
+    wire_d = g["wire_d"]
+    build = n_layers * wire_d * 1.08 * 0.92          # coil.LAYER_PITCH etc
+
     if g["circuit"] == "potcore":
-        # split the radius: magnet / clearance / keeper
         f_clear, f_steel = g["f_clear"], g["f_steel"]
         f_mag = max(1.0 - f_clear - f_steel, 0.25)
         tot = f_mag + f_clear + f_steel
-        d_mag = 2.0 * r_out * f_mag / tot
-        r_clear = r_out * f_clear / tot
-        t_steel = r_out * f_steel / tot
+        avail = max(r_out - build, 0.5e-3)
+        d_mag = 2.0 * avail * f_mag / tot
+        r_clear = avail * f_clear / tot
+        t_steel = avail * f_steel / tot
     else:
-        d_mag = 2.0 * r_out
+        d_mag = 2.0 * max(r_out - build, 0.5e-3)
         r_clear = 0.0
-        t_steel = g["f_steel"] * 1.5e-3      # winding build only
+        t_steel = 0.3e-3
 
     depth_max = 0.85 * r_face
     l_mag = max(g["l_frac"] * depth_max -
@@ -140,8 +159,10 @@ def to_design(g):
     return Design(material=g["material"], circuit=g["circuit"], n_gon=n,
                   r_face=r_face, d_mag=max(d_mag, 1.0e-3), l_mag=l_mag,
                   t_steel=max(t_steel, 0.3e-3), r_clear=max(r_clear, 0.0),
-                  gap=g["gap"], wire_d=g["wire_d"], v_cap=g["v_cap"],
-                  c_cap=g["c_cap"])
+                  gap=g["gap"], wire_d=wire_d, n_layers=max(n_layers, 1),
+                  v_cap=g["v_cap"], c_cap=g["c_cap"],
+                  pulse_mode=g["pulse_mode"], f_pulse=g["f_pulse"],
+                  duty=g["duty"], n_pulses=max(int(round(g["n_pulses"])), 1))
 
 
 def genome_key(g):
@@ -232,7 +253,7 @@ def sbx(p1, p2, rng, eta=15.0, p_cross=0.9):
                 c1[name], c2[name] = p2[name], p1[name]
             continue
         lo, hi = spec[2], spec[3]
-        x1, x2 = p1[name], p2[name]
+        x1, x2 = float(p1[name]), float(p2[name])
         if abs(x1 - x2) < 1e-14:
             continue
         u = rng.random()
@@ -240,9 +261,14 @@ def sbx(p1, p2, rng, eta=15.0, p_cross=0.9):
             (1 / (2 * (1 - u))) ** (1 / (eta + 1))
         a = 0.5 * ((x1 + x2) - beta * abs(x2 - x1))
         b = 0.5 * ((x1 + x2) + beta * abs(x2 - x1))
-        c1[name] = float(np.clip(a, lo, hi))
-        c2[name] = float(np.clip(b, lo, hi))
+        c1[name] = _clip(name, kind, a, lo, hi)
+        c2[name] = _clip(name, kind, b, lo, hi)
     return c1, c2
+
+
+def _clip(name, kind, x, lo, hi):
+    v = float(np.clip(x, lo, hi))
+    return int(round(v)) if kind == "int" else v
 
 
 def mutate(g, rng, eta=20.0, p_mut=None):
@@ -257,7 +283,7 @@ def mutate(g, rng, eta=20.0, p_mut=None):
             out[name] = spec[2][rng.integers(len(spec[2]))]
             continue
         lo, hi = spec[2], spec[3]
-        x = out[name]
+        x = float(out[name])
         d1, d2 = (x - lo) / (hi - lo), (hi - x) / (hi - lo)
         u = rng.random()
         if u < 0.5:
@@ -266,8 +292,84 @@ def mutate(g, rng, eta=20.0, p_mut=None):
         else:
             dq = 1 - (2 * (1 - u) + 2 * (u - 0.5) *
                       (1 - d2) ** (eta + 1)) ** (1 / (eta + 1))
-        out[name] = float(np.clip(x + dq * (hi - lo), lo, hi))
+        out[name] = _clip(name, kind, x + dq * (hi - lo), lo, hi)
     return out
+
+
+# --------------------------------------------------------------------------
+# Local refinement
+# --------------------------------------------------------------------------
+def merit(row):
+    """Single number a local search can climb.
+
+    Feasible designs are ranked by the scalar score, which is positive.
+    Infeasible ones are ranked by minus their total violation, which is
+    negative, so any feasible design beats any infeasible one and an
+    infeasible design can still walk downhill towards the feasible region.
+    A local search needs a total order; the GA does not, which is why the two
+    use different comparisons on the same evaluations.
+    """
+    if row.get("feasible"):
+        return float(row.get("scalar") or 0.0)
+    return -violation(row)
+
+
+def local_refine(g0, evaluate_many, budget=40, step0=0.25, shrink=0.5,
+                 min_step=0.01, verbose=False):
+    """Compass search on the continuous genes, categoricals held fixed.
+
+    Why a pattern search rather than a gradient method: the objective is a
+    chain of nonlinear solves with no derivative available, it is mildly
+    discontinuous wherever a driver component selection flips, and it is
+    expensive.  Compass search needs no derivative, tolerates the
+    discontinuities, and - the part that matters here - evaluates 2N
+    independent trial points per iteration, so a whole iteration fits in one
+    parallel batch.
+
+    ``evaluate_many`` takes a list of genomes and returns a list of rows, so
+    the caller supplies its own cache and process pool.
+    """
+    specs = [s for s in GENOME if s[1] in ("real", "int")]
+    g = dict(g0)
+    base = evaluate_many([g])[0]
+    best_m = merit(base)
+    used = 1
+    step = step0
+    history = [dict(n=used, merit=best_m, step=step)]
+
+    while used < budget and step >= min_step:
+        trials, tags = [], []
+        for name, kind, lo, hi in specs:
+            span = hi - lo
+            for sgn in (+1, -1):
+                cand = dict(g)
+                x = float(g[name]) + sgn * step * span
+                cand[name] = _clip(name, kind, x, lo, hi)
+                if cand[name] == g[name]:
+                    continue
+                trials.append(cand)
+                tags.append((name, sgn))
+        if not trials:
+            break
+        if used + len(trials) > budget:
+            trials = trials[: max(budget - used, 0)]
+            tags = tags[: len(trials)]
+        if not trials:
+            break
+        rows = evaluate_many(trials)
+        used += len(trials)
+        ms = [merit(r) for r in rows]
+        k = int(np.argmax(ms))
+        if ms[k] > best_m + 1e-12:
+            g, best_m = trials[k], ms[k]
+            if verbose:
+                print(f"      local: {tags[k][0]} {tags[k][1]:+d} -> "
+                      f"merit {best_m:.4f} ({used} evals)", flush=True)
+        else:
+            step *= shrink
+        history.append(dict(n=used, merit=best_m, step=step))
+
+    return g, best_m, used, history
 
 
 # --------------------------------------------------------------------------
@@ -388,11 +490,14 @@ class GAResult:
     rows: list
     fronts: list
     history: list
+    refined: dict = None
+    cache: dict = None
 
 
 def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
            csv_path=None, verbose=True, workers=None, checkpoint=None,
-           resume=False):
+           resume=False, refine_every=5, refine_top=2, refine_budget=16,
+           final_refine=200):
     cfg = dict(pop_size=pop_size, generations=generations, seed=seed,
                fidelity=fidelity)
     rng = np.random.default_rng(seed)
@@ -479,6 +584,28 @@ def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
             if gen == generations:
                 break
 
+            # ---- local refinement of the seeds, between generations
+            # The GA is good at finding the right REGION and poor at the last
+            # few per cent inside it, because polynomial mutation makes small
+            # steps only by luck.  A compass search on the best few
+            # individuals fixes that, and its refined genomes go back into the
+            # population so the improvement is inherited rather than
+            # discarded.  Every point it evaluates is recorded in the same
+            # cache, so the refinements appear in the design matrix too.
+            if refine_every and refine_top and gen and gen % refine_every == 0:
+                order = sorted(range(len(pop)),
+                               key=lambda i: -merit(rows[i]))
+                gained = 0
+                for i in order[:refine_top]:
+                    g_new, m_new, used, _ = local_refine(
+                        pop[i], ev_many, budget=refine_budget)
+                    if m_new > merit(rows[i]) + 1e-12:
+                        pop[i] = g_new
+                        gained += 1
+                if verbose and gained:
+                    print(f"        local search improved {gained} seed(s), "
+                          f"{n_eval[0]} evals total", flush=True)
+
             # ---- tournament selection on (rank, crowding)
             rank = np.zeros(len(pop), dtype=int)
             crowd = np.zeros(len(pop))
@@ -521,6 +648,37 @@ def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
             pop = newpop
 
         rows = ev_many(pop)
+
+        # ---- final refinement: hammer the overall best design
+        # Between generations the local search gets a small budget, because it
+        # is competing with the GA for evaluations.  Once the GA has finished
+        # there is nothing left to compete with, so the winner gets a much
+        # larger budget and a finer terminating step.  This is where the last
+        # few per cent come from.
+        refined = None
+        if final_refine:
+            k = int(np.argmax([merit(r) for r in rows]))
+            before = merit(rows[k])
+            g_new, m_new, used, hist = local_refine(
+                pop[k], ev_many, budget=final_refine, step0=0.15,
+                min_step=0.002, verbose=verbose)
+            if verbose:
+                print(f"\n  final local search on the best design: "
+                      f"merit {before:.4f} -> {m_new:.4f} in {used} "
+                      f"evaluations", flush=True)
+            if m_new > before + 1e-12:
+                pop[k] = g_new
+                rows = ev_many(pop)
+            refined = dict(index=k, before=before, after=m_new,
+                           evals=used, history=hist)
+            # Checkpoint AFTER the final refinement, not only before it.
+            # Otherwise the 200 evaluations that produced the winning design -
+            # including the winner itself - are absent from the saved state,
+            # and the design matrix written from that state does not contain
+            # the design the run reports as best.
+            if checkpoint:
+                save_checkpoint(checkpoint, generations, pop, cache, rng,
+                                history, cfg)
     finally:
         if pool is not None:
             pool.shutdown(wait=True)
@@ -532,17 +690,29 @@ def run_ga(pop_size=32, generations=12, seed=0, fidelity="screen",
     if csv_path:
         write_rows(csv_path, list(cache.values()))
 
-    return GAResult(population=pop, rows=rows, fronts=fronts, history=history)
+    res = GAResult(population=pop, rows=rows, fronts=fronts, history=history)
+    res.refined = refined
+    res.cache = cache
+    return res
 
 
-def write_rows(path, rows):
+def write_rows(path, rows, append=False):
+    """Write the design matrix.
+
+    Overwrites by default.  Appending was the old behaviour and it silently
+    mixed schemas: a rerun after the row fields changed left the file with the
+    previous run's columns for its first thousand rows and the new ones after,
+    so the "best design" read back out of it was a stale row from a model that
+    no longer exists.  A run writes its own matrix; use ``append`` only when
+    deliberately accumulating separate sweeps.
+    """
     from framework import ROW_FIELDS
     path = Path(path)
-    new = not path.exists()
-    with open(path, "a", newline="") as fh:
+    mode = "a" if (append and path.exists()) else "w"
+    with open(path, mode, newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(ROW_FIELDS),
                            extrasaction="ignore")
-        if new:
+        if mode == "w":
             w.writeheader()
         for r in rows:
             w.writerow({k: r.get(k) for k in ROW_FIELDS})
