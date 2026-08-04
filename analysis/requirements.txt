@@ -1,0 +1,23 @@
+# Pinned for the Magnobots design pipeline (analysis/).
+#
+# These are not "latest that works" - they are the versions every number in
+# RESEARCH_LOG.md was produced with.  Two of them matter more than usual:
+#
+#   numpy      2.0 removed np.trapz and renamed it np.trapezoid.  analysis/
+#              goes through compat.py so either major works, but the pin keeps
+#              a fresh container on the version the results were generated on.
+#   scikit-fem the condense / solve / Basis API used by axisym_fem.py is stable
+#              within 8.x-12.x but was different before 8.  Do not float this
+#              below 8 without re-running analysis/verify_fem.py.
+#
+# Reproduce with:  python -m pip install -r requirements.txt
+
+numpy==1.26.4
+scipy==1.13.0
+scikit-fem==12.0.2
+mujoco==3.11.0
+trimesh==5.0.0
+matplotlib==3.8.4
+
+# design explorer only (analysis/viz) - not needed to run the pipeline
+flask==3.0.3

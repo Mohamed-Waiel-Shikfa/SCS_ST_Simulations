@@ -70,6 +70,34 @@ def field_kernel(beta):
     return (psi * _WEIGHT).sum(-1) / np.pi
 
 
+_PHI_INF = 4.0 / (3.0 * np.pi)
+_ASYM_FROM = 100.0
+
+
+def field_kernel_diff(u1, u2):
+    """Phi(u2) - Phi(u1), evaluated without catastrophic cancellation.
+
+    Phi saturates at 4/(3 pi), so for large arguments the direct difference of
+    two nearly equal saturated values is pure round-off.  The asymptotic
+    expansion
+
+        Phi(b) = 4/(3 pi) - 1/(4 b) + 1/(8 b^3) + O(b^-5)
+
+    (verified numerically to 1e-15 by b = 1e5) lets the difference be written in
+    a form where the leading terms cancel analytically instead of numerically.
+    """
+    u1 = np.asarray(u1, dtype=float)
+    u2 = np.asarray(u2, dtype=float)
+    out = np.atleast_1d(field_kernel(u2) - field_kernel(u1)).astype(float)
+    far = np.atleast_1d(np.minimum(u1, u2) > _ASYM_FROM)
+    if np.any(far):
+        a1 = np.atleast_1d(np.broadcast_to(u1, far.shape))[far]
+        a2 = np.atleast_1d(np.broadcast_to(u2, far.shape))[far]
+        out[far] = ((a2 - a1) / (4.0 * a1 * a2)
+                    + 1.0 / (8.0 * a2**3) - 1.0 / (8.0 * a1**3))
+    return out.reshape(np.broadcast(u1, u2).shape)
+
+
 def cylinder_demag_factor(radius, length):
     """Magnetometric (volume-averaged) demagnetising factor of a cylinder."""
     return 2.0 * radius * field_kernel(length / radius) / length
@@ -204,12 +232,29 @@ class CoaxialRodPair:
     material: Material
     n_slabs: int = 24
     H_min: np.ndarray = field(default=None, repr=False)
+    orient: np.ndarray = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.H_min is None:
             self.H_min = np.zeros(2 * self.n_slabs)
+        if self.orient is None:
+            self.orient = np.ones(2 * self.n_slabs)
         self._M_cache = {}
         self._J_last = None
+
+    def set_orientation(self, rod_a=+1, rod_b=+1):
+        """Set the magnetisation sense of each rod.
+
+        ``rod_a = rod_b = +1`` is the attracting state.  Reversing one rod gives
+        the repelling state used for pivoting.  The two rods then drive each
+        other backwards along their own demagnetisation curves, so the solve is
+        genuinely different, not just a sign flip on the force.
+        """
+        n = self.n_slabs
+        self.orient = np.concatenate([np.full(n, float(rod_a)),
+                                      np.full(n, float(rod_b))])
+        self._J_last = None
+        return self
 
     # ---- geometry helpers ------------------------------------------------
     def _edges(self, gap):
@@ -242,59 +287,94 @@ class CoaxialRodPair:
             """Average H_z in every slab from a unit (1 T) sheet at z_sheet."""
             u1 = np.abs(lo[:, None] - z_sheet[None, :]) / R
             u2 = np.abs(hi[:, None] - z_sheet[None, :]) / R
-            return (R / (MU0 * dz[:, None])) * (field_kernel(u2) - field_kernel(u1))
+            return (R / (MU0 * dz[:, None])) * field_kernel_diff(u1, u2)
 
         M = avg(z_top) - avg(z_bot)
         self._M_cache[key] = M
         return M
 
     # ---- solver ----------------------------------------------------------
-    def solve(self, gap, freeze_history=True, tol=1e-9, max_iter=80, J0=None):
-        """Solve the magnetisation integral equation J = law(M @ J).
+    def _newton(self, M, J, tol, max_iter):
+        """Damped Newton on the residual r(J) = J - law(s * (M @ (s*J))).
 
-        A damped Newton iteration is used rather than successive substitution:
-        near the knee of a low-coercivity curve dJ/dH is of order Br/2 kA/m, so
-        the fixed-point map has a spectral radius in the hundreds and simple
-        relaxation cannot converge.
+        ``J`` is the magnitude of the polarisation; the signed polarisation is
+        ``orient * J``.  Each slab's material law is driven by the field
+        component along its OWN magnetisation axis, which is why the reversed
+        state is a different solve rather than a sign flip.
+
+        Successive substitution is not usable here: near the knee of a
+        low-coercivity curve dJ/dH is of order Br per 2 kA/m, so the fixed-point
+        map has a spectral radius in the hundreds.
         """
-        M = self._coupling(gap)
+        s = self.orient
         law = lambda H: self.material.J_recoil(H, self.H_min)  # noqa: E731
-        if J0 is not None:
-            J = J0.copy()
-        elif self._J_last is not None:
-            J = self._J_last.copy()
-        else:
-            J = np.full(2 * self.n_slabs, self.material.J(0.0))
         eye = np.eye(2 * self.n_slabs)
         dH = max(1.0, 1e-5 * self.material.Hcj)
+        Jsat = self.material.J(0.0)
+        Ms = M * s[None, :] * s[:, None]      # drives J -> H along own axis
 
-        r = J - law(M @ J)
+        r = J - law(Ms @ J)
+        best = (float(np.max(np.abs(r))), J.copy())
         for _ in range(max_iter):
-            if np.max(np.abs(r)) < tol:
+            rn = float(np.max(np.abs(r)))
+            if rn < tol:
                 break
-            H = M @ J
+            H = Ms @ J
             deriv = (law(H + dH) - law(H - dH)) / (2.0 * dH)
-            step = np.linalg.solve(eye - deriv[:, None] * M, -r)
-            for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.02):
-                J_try = np.clip(J + alpha * step, 0.0, self.material.J(0.0))
-                r_try = J_try - law(M @ J_try)
-                if np.max(np.abs(r_try)) < np.max(np.abs(r)):
+            try:
+                step = np.linalg.solve(eye - deriv[:, None] * Ms, -r)
+            except np.linalg.LinAlgError:
+                break
+            improved = False
+            for alpha in (1.0, 0.5, 0.25, 0.1, 0.05, 0.02, 5e-3, 1e-3):
+                J_try = np.clip(J + alpha * step, 0.0, Jsat)
+                r_try = J_try - law(Ms @ J_try)
+                if float(np.max(np.abs(r_try))) < rn:
+                    J, r, improved = J_try, r_try, True
                     break
-            J, r = J_try, r_try
-        else:
-            if np.max(np.abs(r)) > 1e-6:
-                if J0 is None and self._J_last is not None:
-                    # the warm start was a bad basin; retry from the saturated state
-                    self._J_last = None
-                    return self.solve(gap, freeze_history, tol, max_iter)
-                raise RuntimeError(f"rod solver did not converge (residual "
-                                   f"{np.max(np.abs(r)):.2e} T at gap {gap:g} m)")
+            if not improved:
+                break
+            if float(np.max(np.abs(r))) < best[0]:
+                best = (float(np.max(np.abs(r))), J.copy())
+        return best[1], best[0]
 
-        H = M @ J
+    def solve(self, gap, freeze_history=True, tol=1e-9, max_iter=80, J0=None):
+        """Solve for the polarisation magnitudes.
+
+        Returns ``(J_signed, H)`` where ``J_signed = orient * J`` is the actual
+        polarisation and ``H`` is the field along each slab's own axis.
+        """
+        M = self._coupling(gap)
+        s = self.orient
+        Ms = M * s[None, :] * s[:, None]
+        Jsat = self.material.J(0.0)
+
+        if J0 is not None:
+            start = np.abs(J0.copy())
+        elif self._J_last is not None:
+            start = self._J_last.copy()
+        else:
+            start = np.full(2 * self.n_slabs, Jsat)
+
+        J, res = self._newton(M, start, tol, max_iter)
+
+        if res > 1e-6:
+            # Newton stalled in a bad basin.  Walk in from the trivial problem
+            # by ramping the demagnetising coupling from zero to full,
+            # warm-starting each step.  The branch is monotone in lambda, so
+            # this tracks the physical solution rather than jumping basins.
+            J = np.full(2 * self.n_slabs, Jsat)
+            for lam in np.linspace(0.1, 1.0, 10):
+                J, res = self._newton(lam * M, J, tol, max_iter)
+            if res > 1e-6:
+                raise RuntimeError(f"rod solver did not converge (residual "
+                                   f"{res:.2e} T at gap {gap:g} m)")
+
+        H = Ms @ J
         self._J_last = J
         if not freeze_history:
             self.H_min = np.minimum(self.H_min, H)
-        return J, H
+        return s * J, H
 
     # ---- force -----------------------------------------------------------
     def _sheet_charges(self, J):
@@ -328,7 +408,11 @@ class CoaxialRodPair:
         """
         if separation is None:
             separation = 200.0 * self.length
+        saved = self.orient.copy()
+        self.orient = np.ones_like(saved)     # isolated rods: sense is moot
         self.solve(separation, freeze_history=False)
+        self.orient = saved
+        self._J_last = None
 
     def reset_history(self):
         self.H_min = np.zeros(2 * self.n_slabs)
@@ -366,6 +450,14 @@ def _self_test():
     check("G(0) = 1/2", float(force_kernel(0.0)), 0.5, 1e-9)
     check("Phi(0) = 0", float(field_kernel(0.0)), 0.0, 1e-12)
     check("Phi(inf) = 4/(3 pi)", float(field_kernel(1e6)), 4.0 / (3.0 * np.pi), 1e-6)
+    check("Phi asymptote 4/(3pi) - 1/(4b) + 1/(8b^3)",
+          float(field_kernel(30.0)),
+          4.0 / (3.0 * np.pi) - 1.0 / 120.0 + 1.0 / (8 * 27000.0), 1e-8)
+    check("stable diff matches direct at moderate u",
+          float(field_kernel_diff(20.0, 21.0)),
+          float(field_kernel(21.0)) - float(field_kernel(20.0)), 1e-14)
+    check("stable diff survives u ~ 1e11",
+          float(field_kernel_diff(1e11, 1e11 + 1.0)), 2.5e-23, 1e-25)
 
     print("magnetometric demagnetising factors")
     # Chen, Brug & Goldfarb, IEEE Trans. Magn. 27(4) 1991, magnetometric column.
@@ -408,6 +500,25 @@ def _self_test():
     check("Hcb", hcb, 48e3, 1e3)
     check("(BH)max", float(np.max(B * -H)), 37e3, 1e3)
     check("Br", aln.J(0.0), 1.20, 1e-6)
+
+    print("reversed magnetisation (repel state)")
+    R, L = 2.375e-3, 12.5e-3
+    rigid2 = Material("rigid", Br=0.8, Hcj=1e12, mu_rec=1.0, p=60.0, q=0.5)
+    pa = CoaxialRodPair(R, L, rigid2, n_slabs=12)
+    pr = CoaxialRodPair(R, L, rigid2, n_slabs=12).set_orientation(+1, -1)
+    fa, fr = pa.force(0.1e-3), pr.force(0.1e-3)
+    check("rigid: |F_repel| = |F_attract|", abs(fr), abs(fa), 1e-9 * abs(fa))
+    check("rigid: repel force flips sign", np.sign(fr), -np.sign(fa), 0)
+
+    aln2 = alnico_lng37()
+    pa = CoaxialRodPair(R, L, aln2, n_slabs=16)
+    pr = CoaxialRodPair(R, L, aln2, n_slabs=16).set_orientation(+1, -1)
+    Ja, _ = pa.solve(0.1e-3)
+    Jr, _ = pr.solve(0.1e-3)
+    check("Alnico: repel J below attract J",
+          float(np.mean(Ja[:16])) > float(np.mean(np.abs(Jr[:16]))), True, 0)
+    check("Alnico: repel force is repulsive",
+          np.sign(pr.force(0.1e-3)), -np.sign(pa.force(0.1e-3)), 0)
 
     print("\n" + ("ALL SELF-TESTS PASSED" if ok else "SELF-TESTS FAILED"))
     return ok

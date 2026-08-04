@@ -3,3 +3,6 @@ numpy
 scipy
 dash
 plotly
+scikit-fem
+mujoco
+trimesh
