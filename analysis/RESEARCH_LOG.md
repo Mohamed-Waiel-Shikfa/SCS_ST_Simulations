@@ -683,3 +683,204 @@ derived one.
 This is a reporting hazard rather than an error - the objective, the driver
 selection and the mass budget are all consistent with `v_need` - but it is
 worth knowing before quoting a peak current out of the matrix.
+
+
+---
+
+# Third pass: can the N42 block itself be the electropermanent magnet?
+
+The bench proof of concept is eight N42 blocks per module, 20 x 10 x 5 mm,
+switched by hand.  It works.  The obvious question is whether the hand can be
+replaced by a coil - keep the magnet that already produces the force, wrap
+copper round it, and reverse it in place.
+
+It cannot, and the reason is worth stating precisely because it is not the
+one that first comes to mind.
+
+## It is not mainly the coercivity, it is the shape
+
+A magnet in open circuit sits in its own demagnetising field, H_d = -N_d M.
+The block is magnetised through its SHORTEST axis, which is the worst case:
+the exact factor from the verified cuboid kernel is
+
+    N_d = 0.669   magnetised through  5 mm   (as specified)
+    N_d = 0.262   magnetised through 10 mm
+    N_d = 0.069   magnetised through 20 mm
+
+At N_d = 0.669 an N42 block generates 703 kA/m against itself - 74 per cent of
+its own coercivity - while sitting on the bench doing nothing.  That is
+survivable for NdFeB, whose loop is square, and it is what makes thin NdFeB
+discs practical at all.
+
+The same factor appears twice in the switching problem, and the second
+appearance is the expensive one:
+
+* **Starting** the reversal is nearly free.  The magnet's own demag field is
+  already pushing it backwards, so the coil only has to make up the
+  difference: 252 kA/m.
+* **Finishing** it is not.  Once the magnet has flipped, its demag field has
+  flipped too and now opposes: 3,103 kA/m.  A magnet reversed only part of the
+  way is a weak magnet, so for an electropermanent magnet the second number is
+  the requirement.
+* The coil is also a pancake.  A winding 5 mm long around a 20 x 10 mm section
+  delivers only 33 per cent of its ampere-turns per metre as field at the
+  centre - the same demagnetising factor again, used the other way round.
+
+Together: **46,800 ampere-turns**.  With a steel return path it would be
+12,000; there is no steel here, which is the third of the three penalties.
+
+## The wire gauge decides nothing
+
+Sweeping wire diameter from 0.05 to 1.6 mm through the same window, for the
+same ampere-turns, the peak power barely moves - because
+
+    P = (NI)^2 * rho * l_turn / (k * A_window)
+
+contains no gauge term at all.  Ampere-turns and the window geometry set the
+power; the gauge only chooses whether it arrives as 34 kV at 25 A or 130 V at
+9,400 A.  **You cannot wind your way out of an ampere-turns requirement.**
+
+## Why 0.1 mm wire on Alnico did nothing
+
+Same identity rearranged for a voltage source:
+
+    NI = V * k * A_window / (N * rho * l_turn)
+
+Ampere-turns are inversely proportional to the NUMBER OF TURNS at fixed
+voltage, because adding turns of thin wire adds resistance faster than it adds
+turns.  For a 4.75 x 12.5 mm Alnico rod needing 4,444 ampere-turns:
+
+| wire | turns | R | NI at 12 V | V for full reversal |
+|---|---|---|---|---|
+| 0.10 mm | 1725 | 117 ohm | 178 | **300 V** |
+| 0.20 mm | 399 | 6.7 ohm | 720 | 74 V |
+| 0.40 mm | 84 | 0.34 ohm | 2,960 | **18 V** |
+
+The 0.1 mm winding was short by a factor of 25 at bench-supply voltage, which
+is why nothing happened at all rather than something partial.  The wire was
+not the problem and neither was the layer count - the DRIVE was.  The same
+coil on a few hundred volts would have worked, and so would 0.4 mm wire on
+18 V.
+
+This matters because "thinner wire, more turns" is the intuitive fix and it is
+the wrong direction: it raises the voltage needed.  What a low-voltage supply
+wants is fewer turns of thicker wire.
+
+## The fly swatter: right topology, wrong scale by five orders of magnitude
+
+A swatter is a battery, an oscillator, a step-up transformer and a multiplier
+- which is exactly the architecture of a capacitor-discharge magnetiser.  What
+does not carry over is the energy.  A swatter charges tens of nanofarads to a
+couple of kilovolts because all it has to do is break down air:
+
+| bank | energy | switches of this magnet |
+|---|---|---|
+| 10 nF at 2 kV | 20 mJ | 0.0003 |
+| 1 uF at 3 kV | 4.5 J | 0.07 |
+
+Against a requirement of 40 to 63 J per switch, at a kilovolt and two thousand
+amps.  That is not a robot subsystem, it is a bench magnetiser - commercial
+NdFeB magnetisers are 1 to 3 kJ machines the size of a filing cabinet, and
+this is the same job.  Eight faces would be 506 J per reconfiguration, about
+26 reconfigurations from a 1000 mAh cell before any of it is spent moving.
+
+**The hypothesis is dead.**  What survives is the silicon: the LT3750 flyback
+capacitor charger is the swatter's oscillator done properly, and it is in the
+final design below.
+
+## What the bench model actually proved
+
+Two things, and the second is easy to miss.
+
+**Force.** Two N42 blocks at a 0.2 mm gap pull with 60 N.
+
+**Symmetry.** They also PUSH with 60 N - an attract/repel ratio of 1.00.  That
+is a property of rigid magnetisation, not of the arrangement.  A
+low-coercivity magnet cannot do it: in the repelling state the two magnets
+drive each other down their own demagnetisation curves and the polarisation
+collapses, which is why every Alnico design in this repository comes out with
+an asymmetry of four to six and has to be optimised against it.
+
+The bench model works *so cleanly* partly because it is doing something an
+electropermanent magnet fundamentally cannot.
+
+## And why swapping in Alnico does not work either
+
+Alnico's remanence matches NdFeB - LNG52 is 1.30 T against N42's 1.32 - so on
+paper it is a straight substitution.  It is not, because in the bench block's
+shape the self-demagnetising field is 12 times LNG52's coercivity.  It would
+erase itself before ever meeting a neighbour.
+
+Alnico needs L/D of four or more, and the flux from that thin rod then has to
+be spread onto a usable pole face by a steel pole piece - which conserves
+flux.  Working backwards from the pole flux density needed:
+
+| pole | rod diameter | rod length | fits a 48 mm module? |
+|---|---|---|---|
+| 0.90 T | 13.8 mm | 55 mm | no |
+| 0.60 T | 11.3 mm | 45 mm | no |
+| 0.40 T | 9.2 mm | 37 mm | yes, 13 N |
+
+**There is no Alnico geometry that fits inside a 48 mm module and reaches
+60 N.**  The optimiser found the same wall from the other side: its best
+feasible designs sit at 3 to 7 N.
+
+## The move that decides the architecture
+
+If a face can only be switched ON and OFF - never reversed - is that enough?
+It depends on whether the next face round the ring can pull a module up onto
+its neighbour before the current face lets go.  Integrating the torque through
+the 90 degree climb, with rigid N42 magnetisation and one exact cell per
+block:
+
+    work from the reach pair      276 mJ
+    work against gravity          -51 mJ
+    net                           226 mJ      a 5.5x margin
+
+So **yes** - with N42-class magnets an on/off face can pull a module over.
+This is the opposite of the finding for the Alnico designs, where the same
+manoeuvre failed: the reach force falls off as roughly the fourth power of
+distance, so an order of magnitude in contact force becomes two orders at the
+13 mm reach separation.
+
+The restriction is real, though, and should be stated: with no repulsion there
+is nothing to push against, so a module can only ever climb ONTO another
+module.  Two modules alone on a floor could never separate, and no module
+could traverse open ground.
+
+## The architecture that wins
+
+Keep the N42 and never switch it.  Put a small Alnico beside it in a shared
+steel circuit and switch that.  Parallel, both drive flux out through the
+poles; antiparallel, the flux circulates internally and almost none escapes.
+The decisive point is that the Alnico now sits in an essentially CLOSED
+circuit, so it has no shape penalty and no open-circuit demagnetising field -
+the three penalties that made the bare block cost 46,800 ampere-turns are all
+gone at once.
+
+Sized for a 20 x 10 mm face split into two poles at 0.95 T:
+
+| | |
+|---|---|
+| holding force at contact | 61 N, matching the bench model |
+| NdFeB cross-section | 61 mm2 |
+| Alnico cross-section | 62 mm2, matched on FLUX not area |
+| ampere-turns to switch | 4,200, against 46,800 for the bare block |
+| coil | 200 turns of 0.315 mm, 2.0 ohm, 7 m of wire, 4.8 g |
+| pulse | 150 V, 21 A, 215 us, 0.1 K temperature rise |
+| energy per face | 709 mJ from the bank |
+| per reconfiguration | 5.7 J, about 2,300 from a 1000 mAh cell |
+
+Reversing a magnet in a closed steel circuit is a FLUX SWING problem, not a
+current problem, and the two constraints are separate: the current sets the
+ampere-turns that push the Alnico past saturation, and the volt-seconds must
+cover N dPhi.  A constant-inductance model gets this badly wrong - the
+small-signal inductance of a coil on closed steel is tens of millihenries and
+predicts the current never arrives.  It does arrive, because by the time the
+ampere-turns approach the switching threshold the steel is deeply saturated
+and the inductance has collapsed towards its air value.  That collapse is the
+mechanism, not an inconvenience.
+
+At 150 V and 21 A this is an ordinary motor-driver problem: 200 V MOSFETs, a
+100 uF electrolytic, a shared H-bridge with per-face select switches, and an
+LT3750 to charge the bank.  Nothing in it is exotic, which is the point.
