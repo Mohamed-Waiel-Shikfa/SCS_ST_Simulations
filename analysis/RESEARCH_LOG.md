@@ -884,3 +884,175 @@ mechanism, not an inconvenience.
 At 150 V and 21 A this is an ordinary motor-driver problem: 200 V MOSFETs, a
 100 uF electrolytic, a shared H-bridge with per-face select switches, and an
 LT3750 to charge the bank.  Nothing in it is exotic, which is the point.
+
+---
+
+## Fourth pass: the same magnet, on wall power
+
+`analysis/bench_prototype.py`
+
+The third pass concluded that a bare N42 block is not switchable in a
+battery-powered robot. That conclusion was correct and it still stands, but it
+answered a question about a *robot*. The question actually worth asking first
+is whether the mechanism can be demonstrated at all, and that is a bench
+question: wall power, seconds between shots, one magnet at a time, size and
+efficiency negotiable.
+
+Nothing in the physics changes. The magnet still needs about 3,100 kA/m inside
+it to saturate in reverse. What changes is that 147 J from a socket every ten
+seconds is unremarkable, where 147 J from a cell forty times per manoeuvre is
+not. The answer flips because the constraint moved, not because the analysis
+was wrong.
+
+### Multi-pulse does not accumulate
+
+Settled first, because a yes would have made the power supply a much smaller
+machine. Hysteresis is rate-independent, and the state of a hard magnet depends
+on the history of the applied field only through that history's *extrema* - the
+Madelung rules, which are the defining property of the Preisach model. Apply a
+reverse field, remove it, and the magnet sits on a recoil line; apply the same
+field again and it retraces that line back to where it was. Only a pulse deeper
+than every previous one moves the magnetisation. This is why a magnetiser is
+specified by peak field and never by joules or pulse count.
+
+Two real exceptions were quantified and neither rescues the idea. Magnetic
+viscosity gives a few tens of per cent for a million-fold increase in pulse
+length, and only near coercivity. Thermal softening is larger - 0.6 %/K, so
+140 C cuts the requirement by about 40 % - but N42 loses flux irreversibly
+above roughly 80 C, so the magnet you switch hot is weaker afterwards, which
+defeats the purpose.
+
+What multi-pulse *does* buy is on the other axis: switching one face at a time
+from a shared bank. That is adopted throughout, and it is why the bank is sized
+for one coil rather than eight.
+
+### A bug worth recording: energy below the thermodynamic floor
+
+The first coil survey printed 1.4 J for a 30 mm coil, against a field-energy
+floor of `0.5 mu0 H^2 V` = 6.05 J for the magnet volume alone. Any coil result
+below that floor is wrong by construction, and that is what exposed it.
+
+The cause: ampere-turns were being scaled by the *magnet's* 5 mm thickness
+instead of the *coil's* length, which made overhang look free. It is not.
+`NI = H l_coil / coupling`, so doubling the coil doubles the ampere-turns, and
+the coupling gain (0.29 to 0.86, about 3x) does not offset the length increase
+(5 to 30 mm, 6x). The prose that came with the bad table - "overhang is the
+best lever available" - was confidently wrong and has been rewritten.
+
+The replacement sizes on the *minimum* field over the magnet volume, sampled
+including a near-corner point, using the same verified cuboid kernel with the
+solenoid modelled as an equivalent uniformly magnetised block. Sizing on the
+centre field flatters short coils badly, and a magnet reversed only through its
+middle is a partly reversed magnet, which is a weak magnet.
+
+Corrected, the optimum sits at a coil roughly as long as the magnet or slightly
+longer, and every energy figure is 38-160 J against the 6 J floor - the factor
+of two to five expected of a real coil.
+
+### Wire gauge chooses volts, not power
+
+Confirmed again here with 1 mm wire and 1-10 layers. Energy is nearly flat
+across layers because it is set by the field and the volume it must fill, not
+by how the copper is arranged. Layers trade current for voltage at constant
+energy: 2 layers is thousands of amps at a hundred volts, 10 layers is a few
+hundred amps at several hundred. That choice is really the choice of switch and
+capacitor.
+
+### The voltage-energy frontier, and why not to sit at its minimum
+
+At fixed coil and fixed damping, `E = 1/2 L I^2 / eta^2`, where eta is the
+fraction of the ideal peak current that survives resistive damping. Stored
+energy therefore does not depend on how the bank is split between volts and
+farads *except* through eta - and eta gets worse as C grows. The consequence is
+counter-intuitive: a small bank at high voltage is more efficient than a large
+one at low voltage.
+
+| V ceiling | min energy | bank | eta |
+|---|---|---|---|
+| 350 V | 241 J | 4700 uF | 0.44 |
+| 450 V | 177 J | 2200 uF | 0.51 |
+| 800 V | 132 J | 470 uF | 0.59 |
+| 1000 V | 99 J | 220 uF | 0.68 |
+| 1500 V | 78 J | 100 uF | 0.71 |
+
+The build point is 450 V, not the minimum. 450 V is the top of the ordinary
+aluminium-electrolytic range and of what a single-stage charger IC reaches;
+above it the bank becomes series strings with balancing resistors, the switch
+needs 1600 V, and the charger becomes a project. On wall power the energy saved
+is worth nothing and the complexity costs weeks.
+
+### The largest lever: full saturation is not required
+
+Bank energy goes as `H^2`; holding force goes as `Br^2`. Giving up remanence
+therefore buys energy back faster than it costs force, and the mechanism only
+needs enough force to hold a module up, not the full 60 N.
+
+| internal field | Br recovered | pair force | energy |
+|---|---|---|---|
+| 1.5 Hcj | 0.70 | 29 N | 0.47x |
+| 2.0 Hcj | 0.90 | 49 N | 0.71x |
+| 2.5 Hcj | 0.97 | 57 N | 0.99x |
+
+2.0 Hcj is the build point: most of the force, well clear of the steep part of
+the curve, and about a third off the bank. The caveat is stated plainly - these
+fractions are catalogue sizing practice, not a measurement of this block.
+
+### The design
+
+| | |
+|---|---|
+| coil | 3 layers, 45 turns of 1 mm wire, 16 mm long, 20 x 10 mm bore |
+| | 30.5 uH, 92 mohm hot, 22 g of copper |
+| bank | 1500 uF at 443 V = 147 J, four 470 uF/450 V cans |
+| peak current | 1688 A against 1468 needed (1.15x margin) |
+| pulse | 517 us total, peak at 258 us, 994 A^2 s |
+| heating | +10.8 K per shot, no cooling of any kind |
+| recharge | 10 s at 15 W |
+| expected | ~90 % of Br reversed, ~49 N pair force |
+
+The number most likely to be missed is not on any part: everything outside the
+coil - bank ESR, busbar, SCR, joints - must total under **96 mohm** or the
+current never reaches the magnet. This was found the hard way. Sized against an
+assumed ESR the design came out 2 % short, and the capacitor comparison showed
+a photoflash bank clearing the bar while a 450 V general-purpose bank did not,
+purely on paralleling. Loop resistance is now an explicit specification and the
+can count is set by whichever of capacitance and ESR is binding.
+
+### Switch, capacitor, charger
+
+**SCR**, and the reason is that the current is *self-extinguishing*: the bank
+rings into the coil, the current returns to zero after ~517 us, and the SCR
+commutates off by itself. An IGBT would work and its turn-off capability would
+be paid for and never used. A MOSFET is short on both pulse current and I2t. Two
+mandatory companions: a freewheel diode across the bank (without it the ring
+drives the electrolytics into reverse voltage and they vent) and a real gate
+pulse from a transformer (a weak gate turns the die on locally and it fails
+there).
+
+**Supercapacitors are the wrong technology**, and they fail twice. Charge is
+stored in a nanometre double layer across a porous electrode, which is what
+makes them energy dense and also what makes their resistance high *and
+distributed* - the deep charge cannot come out fast at any price. Then the
+arithmetic finishes it: reaching 443 V needs 165 cells in series, multiplying
+ESR by 165, giving a bank ESR of ~5 ohm against a 96 mohm budget. The advance
+in supercapacitors is real and it is along the energy axis; this is a power
+problem.
+
+**Buy the charger.** An LT3750-based module reaches the bank in ~10 s for ~$30.
+A disposable-camera board is a genuine option for the very first shot - $3, and
+it will get a small bank to 330 V in a couple of minutes - but every shot then
+costs minutes. A fly-swatter multiplier is high voltage into a nanofarad at
+under a watt; the topology instinct was right and the power rating is what rules
+it out. What must *not* be bought is the discharge side: face select, freewheel
+diode, loop geometry and gate drive are where the pulse is made or lost.
+
+Rough total: ~$310 including instruments, of which the Rogowski coil is the one
+not to skip - without a current measurement a misfired switch and an unflipped
+magnet look identical.
+
+### What this does not settle
+
+The robot. A per-face bank of this size is not going into a 5 cm module, and
+the gated hybrid remains the architecture for that. This is a rig to answer one
+question - does the mechanism work with real, switched magnets - and it is worth
+answering on its own.
