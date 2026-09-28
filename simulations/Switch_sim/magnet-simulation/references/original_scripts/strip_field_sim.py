@@ -11,7 +11,8 @@ Assumed winding pattern
 - TURNS_PER_LAYER turns are stacked along z, edge to edge, each
   taking up STRIP_WIDTH_MM of axial length.
 - NUM_LAYERS layers are stacked radially outward in x/y, each layer
-  adding STRIP_THICKNESS_MM to the coil's half-width.
+  adding STRIP_THICKNESS_MM + INS_THICKNESS_MM to the coil's
+  half-width (the strip itself, plus the insulation between layers).
 - Every turn circulates in the same direction, so every turn's field
   adds constructively on-axis - exactly like a real coil.
 
@@ -26,12 +27,18 @@ numerical evaluation of the Biot-Savart law for a finite straight
 wire, summed over every segment of every turn, at every point of a
 3D grid filling the bore. No external magnetics/FEM library is used
 - just numpy for the maths and matplotlib for the plot.
+
+The heatmap is interactive: a slider picks an |H| level and draws
+its isoline over the plot, and hovering over the image shows the
+exact coordinates and field value under the cursor. Both use only
+matplotlib's own widget/event API - no extra plotting library.
 =====================================================================
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from matplotlib.widgets import Slider
 
 # =====================================================================
 # PARAMETERS - edit these to design your electromagnet
@@ -39,7 +46,7 @@ from matplotlib.colors import LogNorm
 
 # ---- Copper strip cross-section ----
 STRIP_WIDTH_MM     = 5.0    # strip size along the coil axis (z)     [mm]
-STRIP_THICKNESS_MM = 0.2    # strip size in the radial direction     [mm]
+STRIP_THICKNESS_MM = 0.1    # strip size in the radial direction     [mm]
 INS_THICKNESS_MM = 0.05    # strip size in the radial direction     [mm]
 
 # ---- Winding ----
@@ -60,6 +67,11 @@ N_GRID_X = 40
 N_GRID_Y = 40
 N_GRID_Z = 10
 N_SLICE  = 200    # resolution of the smooth xy heatmap (independent of the grid above)
+
+# ---- Plot appearance ----
+COLOR_CLIP_PERCENTILE = 0.01    # color scale covers [p, 100-p] percentile of the
+                              # slice data, so the near-wire spike (see the note
+                              # printed below) doesn't wash out the rest of it
 
 # =====================================================================
 # 1. GEOMETRY IN SI UNITS
@@ -84,9 +96,10 @@ cross_section_area = strip_width * strip_thickness     # m^2
 
 total_length = 0.0
 for layer in range(NUM_LAYERS):
-    # each layer sits one strip-thickness further out than the last
-    width_x = bore_x + (2 * layer + 1) * strip_thickness
-    width_y = bore_y + (2 * layer + 1) * strip_thickness
+    # each layer sits one strip-thickness + one insulation-thickness
+    # further out than the last
+    width_x = bore_x + (2 * layer + 1) * strip_thickness + (2 * layer) * ins_thickness
+    width_y = bore_y + (2 * layer + 1) * strip_thickness + (2 * layer) * ins_thickness
     perimeter = 2 * (width_x + width_y)
     total_length += TURNS_PER_LAYER * perimeter
 
@@ -94,19 +107,19 @@ resistance        = COPPER_RESISTIVITY * total_length / cross_section_area
 voltage_needed    = CURRENT_A * resistance
 power_dissipated  = CURRENT_A**2 * resistance
 
-# print("=" * 60)
-# print("COIL SUMMARY")
-# print("=" * 60)
-# print(f"Total turns          : {total_turns}")
-# print(f"Coil winding length  : {coil_length_z*1000:.1f} mm  "
-#       f"(bore length parameter: {BORE_LENGTH_Z_MM:.1f} mm)")
-# print(f"Total strip length   : {total_length:.2f} m")
-# print(f"Strip cross-section  : {cross_section_area*1e6:.3f} mm^2")
-# print(f"Coil resistance      : {resistance:.4f} Ohm  ({resistance*1000:.2f} mOhm)")
-# print(f"--> at {CURRENT_A:.2f} A this needs {voltage_needed:.3f} V, "
-#       f"dissipating {power_dissipated:.2f} W")
-# print("=" * 60)
-# print()
+print("=" * 60)
+print("COIL SUMMARY")
+print("=" * 60)
+print(f"Total turns          : {total_turns}")
+print(f"Coil winding length  : {coil_length_z*1000:.1f} mm  "
+      f"(bore length parameter: {BORE_LENGTH_Z_MM:.1f} mm)")
+print(f"Total strip length   : {total_length:.2f} m")
+print(f"Strip cross-section  : {cross_section_area*1e6:.3f} mm^2")
+print(f"Coil resistance      : {resistance:.4f} Ohm  ({resistance*1000:.2f} mOhm)")
+print(f"--> at {CURRENT_A:.2f} A this needs {voltage_needed:.3f} V, "
+      f"dissipating {power_dissipated:.2f} W")
+print("=" * 60)
+print()
 
 # =====================================================================
 # 3. BUILD THE COIL AS A LIST OF STRAIGHT CURRENT SEGMENTS
@@ -205,28 +218,108 @@ print(f"Max |H|      : {H_magnitude.max():.3f} A/m")
 print("=" * 60)
 print("(Note: each turn is modeled as an infinitely thin filament, so")
 print(" values right next to the windings can look artificially high -")
-print(" this matters less as you move away from the coil surface.)")
+print(" this matters less as you move away from the coil surface. The")
+print(" heatmap's color scale is clipped to a percentile range for the")
+print(" same reason - see COLOR_CLIP_PERCENTILE.)")
 print()
 
 # ---- smooth heatmap: xy plane through the bore centre (z = 0) ----
 # Its own fine linspace grid, independent of N_GRID_X/Y/Z above, so
 # the image isn't limited by the (coarser) grid used for the average.
-# x_slice = np.linspace(-bore_x / 2, bore_x / 2, N_SLICE)
-# y_slice = np.linspace(-bore_y / 2, bore_y / 2, N_SLICE)
-# Xs, Ys = np.meshgrid(x_slice, y_slice, indexing='ij')
-# slice_points = np.stack([Xs, Ys, np.zeros_like(Xs)], axis=-1)   # z = 0
+x_slice = np.linspace(-bore_x / 2, bore_x / 2, N_SLICE)
+y_slice = np.linspace(-bore_y / 2, bore_y / 2, N_SLICE)
+Xs, Ys = np.meshgrid(x_slice, y_slice, indexing='ij')
+slice_points = np.stack([Xs, Ys, np.zeros_like(Xs)], axis=-1)   # z = 0
 
-# H_slice_magnitude = np.linalg.norm(compute_H_field(slice_points), axis=-1)  # A/m
+H_slice_magnitude = np.linalg.norm(compute_H_field(slice_points), axis=-1)  # A/m
 
-# plt.figure(figsize=(7, 6))
-# extent = [x_slice.min() * 1000, x_slice.max() * 1000,
-#           y_slice.min() * 1000, y_slice.max() * 1000]
-# im = plt.imshow(H_slice_magnitude.T, extent=extent, origin='lower',
-#                  aspect='auto', cmap='inferno', norm=LogNorm())
-# plt.colorbar(im, label='|H| (A/m)')
-# plt.xlabel('x (mm)')
-# plt.ylabel('y (mm)')
-# plt.title('Magnetic field intensity - middle slice (z = 0 plane)')
-# plt.tight_layout()
-# plt.savefig('electromagnet_field.png', dpi=150)
-# plt.show()
+x_slice_mm = x_slice * 1000
+y_slice_mm = y_slice * 1000
+
+# Robust color limits: a plain min/max would let the near-wire spike (see
+# the note above) stretch the whole scale, crushing the rest of the plot
+# into one shade. Clipping to a percentile range fixes that while still
+# using a log norm (so a 2-5x difference still reads as a clear color
+# change rather than a rounding error).
+color_vmin = np.percentile(H_slice_magnitude, COLOR_CLIP_PERCENTILE)-100
+# color_vmax = np.percentile(H_slice_magnitude, 100 - COLOR_CLIP_PERCENTILE)/3
+color_vmax = 1e7
+
+fig, ax = plt.subplots(figsize=(7, 7.5))
+plt.subplots_adjust(bottom=0.2)
+
+extent = [x_slice_mm.min(), x_slice_mm.max(), y_slice_mm.min(), y_slice_mm.max()]
+im = ax.imshow(H_slice_magnitude.T, extent=extent, origin='lower',
+               aspect='equal', cmap='inferno',
+               norm=LogNorm(vmin=color_vmin/5, vmax=color_vmax))
+plt.colorbar(im, ax=ax, label='|H| (A/m)')
+ax.set_xlabel('x (mm)')
+ax.set_ylabel('y (mm)')
+ax.set_title('Magnetic field intensity - middle slice (z = 0 plane)')
+
+# ---- interactive isoline slider ----
+# The slider itself runs in log space (matching the log color scale) so
+# it gives even control across the whole displayed range.
+log_vmin, log_vmax = np.log10(color_vmin), np.log10(color_vmax)
+init_level = 10 ** ((log_vmin + log_vmax) / 2)
+
+
+def clear_contour(cs):
+    """Remove a previous contour set - works across matplotlib versions."""
+    try:
+        cs.remove()
+    except AttributeError:
+        for coll in cs.collections:
+            coll.remove()
+
+
+current_contour = [ax.contour(x_slice_mm, y_slice_mm, H_slice_magnitude.T,
+                               levels=[init_level], colors='cyan', linewidths=2)]
+
+slider_ax = plt.axes([0.2, 0.06, 0.6, 0.03])
+level_slider = Slider(slider_ax, '|H| isoline', log_vmin, log_vmax,
+                       valinit=np.log10(init_level))
+level_slider.valtext.set_text(f"{init_level:.3g} A/m")
+
+
+def update_isoline(_):
+    clear_contour(current_contour[0])
+    level = 10 ** level_slider.val
+    current_contour[0] = ax.contour(x_slice_mm, y_slice_mm, H_slice_magnitude.T,
+                                     levels=[level], colors='cyan', linewidths=2)
+    level_slider.valtext.set_text(f"{level:.3g} A/m")
+    fig.canvas.draw_idle()
+
+
+level_slider.on_changed(update_isoline)
+
+# ---- hover to read off the value under the cursor ----
+dx = x_slice[1] - x_slice[0]
+dy = y_slice[1] - y_slice[0]
+annot = ax.annotate('', xy=(0, 0), xytext=(15, 15), textcoords='offset points',
+                     bbox=dict(boxstyle='round', fc='w'),
+                     arrowprops=dict(arrowstyle='->'))
+annot.set_visible(False)
+
+
+def on_hover(event):
+    if event.inaxes != ax or event.xdata is None or event.ydata is None:
+        if annot.get_visible():
+            annot.set_visible(False)
+            fig.canvas.draw_idle()
+        return
+
+    ix = int(round((event.xdata / 1000 - x_slice[0]) / dx))
+    iy = int(round((event.ydata / 1000 - y_slice[0]) / dy))
+    if 0 <= ix < N_SLICE and 0 <= iy < N_SLICE:
+        value = H_slice_magnitude[ix, iy]
+        annot.xy = (event.xdata, event.ydata)
+        annot.set_text(f"x={event.xdata:.2f} mm, y={event.ydata:.2f} mm\n|H|={value:.3e} A/m")
+        annot.set_visible(True)
+        fig.canvas.draw_idle()
+
+
+fig.canvas.mpl_connect('motion_notify_event', on_hover)
+
+plt.savefig('electromagnet_field.png', dpi=150)
+plt.show()

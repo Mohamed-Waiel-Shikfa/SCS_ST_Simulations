@@ -1,0 +1,37 @@
+
+N52 / 22-turn foil discharge -- conditional linear-recoil reference
+Conductor: 2.046000 m; 9.166 g; R20 = 70.550 mOhm
+Radial build = 3.250 mm; outer square side = 26.500 mm
+L air = 16.5205 uH; L with mean recoil = 16.6912 uH
+Shorted-eddy high-frequency L limit = 8.2075 uH (6 passive magnet modes)
+Bridge = 1.64 V + 10.4 mOhm * I; external wire = 5 mOhm
+Cap ESR = 45 mOhm, held constant; ESL = 20 nH
+Stored energy = 78.975000 J; C tolerance: +/-20% (not propagated in this reference run)
+Cold LC reference f0 = 1394.0 Hz; foil thickness / skin depth = 0.0565
+Peak coil/SCR current = 1737.09 A at 141.47 us
+Peak capacitor current = 1737.09 A
+DC-bus diode starts = 225.95 us
+Final SCR commutation = 1040.40 us; tail energy booked = 4.104e-08 J
+Final storage / terminal V = 3.80685e-09 / 3.80685e-09 V
+Final copper temperature (adiabatic) = 32.86 C
+Magnet eddy-heating-only temperature rise = 0.140 K (hysteresis heating is unknown)
+Energy audit [J]: copper / capacitor ESR / wiring / two SCRs / magnet eddies
+                  45.394548 / 21.961062 / 3.138503 / 7.424672 / 1.056216
+Max energy-balance residual = 1.106e-07 J
+At peak SLICE AVERAGE driven field [MA/m]: min / max / median / mean / center
+    1.4572 / 4.1758 / 2.0681 / 2.1957 / 1.4572
+Center H/I: thin-filament sum = 857.6908; finite-width integral = 841.1165 A/m/A
+User's 4500-A comparison, NOT a predicted current: thin 3.8596, finite-width 3.7850 MA/m
+Slice area >= 3 MA/m reverse driven Hz at that instant: 11.18% (not switched magnet volume).
+Calculated mean N_z = 0.65330; Br=1.43 T, Hcb_min=796, Hcj_min=875 kA/m.
+Initial center self-demag reference = -860.1 kA/m.
+
+LIMITS -- do not interpret these numerical curves as a validated build:
+* 45 mOhm is a TYPICAL 60 C / 360 Hz datum; pulse ESR and capacitor surge capability are unknown.
+* SCR loss parameters are a 150 C power-loss fit, extrapolated here above its tabulated currents.
+* Per conducting SCR action = 627.70 A^2 s; datasheet references are 6050 / 4370 A^2 s for 10-ms, nonrepetitive half-sines.
+* Peak 1737 A vs 1100 / 935 A at those specified 10-ms tests: no short-pulse SOA or repetitive-use approval follows.
+* Ideal diode, uniform foil current, approximate magnet eddies; no package switching overshoot or plating eddies.
+* Electrical insulation between winding and conductive magnet is required; its base-layer thickness is unspecified.
+* N52 minimum coercivity and an N42 example curve cannot determine reversal or final remanence.
+* Copper and magnet start at 20 C; capacitor/SCR reference data temperatures are NOT silently conflated.
